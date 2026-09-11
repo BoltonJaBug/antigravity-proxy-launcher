@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build app
+        run: make build
+      - name: Create release archive
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build/Antigravity Proxy.app" \
+            "dist/AntigravityProxy-${GITHUB_REF_NAME}.zip"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AntigravityProxy-*.zip
+          generate_release_notes: true

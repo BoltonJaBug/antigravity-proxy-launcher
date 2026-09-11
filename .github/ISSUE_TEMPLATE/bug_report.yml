@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a launcher, proxy, or startup problem.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove tokens, credentials, subscription URLs, and personal paths before posting logs.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "Example: macOS 15.6"
+    validations:
+      required: true
+  - type: input
+    id: antigravity
+    attributes:
+      label: Antigravity version
+      placeholder: "Example: 2.12.2"
+    validations:
+      required: true
+  - type: input
+    id: proxy
+    attributes:
+      label: Proxy client and proxy type
+      placeholder: "Example: Clash Verge, HTTP/Mixed port 7890"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem description
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Output of --print-config and relevant redacted log lines.
+      render: shell
+    validations:
+      required: false

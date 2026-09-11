@@ -1,0 +1,305 @@
+#!/bin/zsh
+# Antigravity app-scoped proxy launcher for macOS.
+# Electron stays direct/local; only language_server inherits the proxy env.
+set -u
+
+VERSION='1.0.0'
+ANTIGRAVITY_APP_FROM_ENV="${ANTIGRAVITY_APP:-}"
+NO_PROXY_FROM_ENV="${ANTIGRAVITY_NO_PROXY:-}"
+ANTIGRAVITY_APP="${ANTIGRAVITY_APP:-/Applications/Antigravity.app}"
+NO_PROXY_VALUE="${ANTIGRAVITY_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
+DEFAULT_PROXY_URL='http://127.0.0.1:7890'
+CONFIG_FILE="${ANTIGRAVITY_CONFIG_FILE:-$HOME/.config/antigravity-proxy.conf}"
+HEALTH_URL='https://daily-cloudcode-pa.googleapis.com/'
+HEALTH_ATTEMPTS=3
+HEALTH_DELAY_SECONDS=2
+
+HTTP_PROXY_URL=''
+HTTPS_PROXY_URL=''
+GRPC_PROXY_URL=''
+PROXY_HOST=''
+PROXY_PORT=''
+DRY_RUN=0
+PRINT_CONFIG=0
+
+usage() {
+  cat <<'USAGE'
+Usage: AntigravityProxy [--dry-run | --print-config | --help | --version]
+
+Options:
+  --dry-run       Check the selected proxy and print the environment without launching Antigravity.
+  --print-config  Detect and print the proxy environment without network access.
+  --help          Show this help.
+  --version       Print the launcher version.
+USAGE
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --print-config) PRINT_CONFIG=1 ;;
+    --help) usage; exit 0 ;;
+    --version) printf '%s\n' "$VERSION"; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$arg" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+notify() {
+  /usr/bin/osascript - "$1" >/dev/null 2>&1 <<'APPLESCRIPT' || true
+on run argv
+  display notification (item 1 of argv) with title "Antigravity Proxy"
+end run
+APPLESCRIPT
+}
+
+config_value() {
+  local wanted="$1"
+  [[ -r "$CONFIG_FILE" ]] || return 0
+  /usr/bin/awk -v wanted="$wanted" '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      pos = index($0, "=")
+      if (pos == 0) next
+      key = substr($0, 1, pos - 1)
+      gsub(/^[[:space:]]+/, "", key)
+      gsub(/[[:space:]]+$/, "", key)
+      if (key != wanted) next
+      val = substr($0, pos + 1)
+      gsub(/^[[:space:]]+/, "", val)
+      gsub(/[[:space:]]+$/, "", val)
+      if (length(val) >= 2) {
+        first = substr(val, 1, 1)
+        last = substr(val, length(val), 1)
+        if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+          val = substr(val, 2, length(val) - 2)
+        }
+      }
+      print val
+      exit
+    }
+  ' "$CONFIG_FILE"
+}
+
+normalize_proxy_url() {
+  local url="$1"
+  [[ "$url" == *'://'* ]] || url="http://${url}"
+  printf '%s\n' "$url"
+}
+
+parse_proxy_url() {
+  local url="$1" scheme authority host port rest
+  scheme="${url%%://*}"
+  authority="${url#*://}"
+  authority="${authority%%/*}"
+
+  case "$scheme" in
+    http|https|socks5|socks5h) ;;
+    *) return 1 ;;
+  esac
+
+  [[ "$authority" != *'@'* ]] || return 1
+
+  if [[ "$authority" == \[*\]* ]]; then
+    host="${authority%%\]*}"
+    host="${host#\[}"
+    rest="${authority#*\]}"
+    [[ "$rest" == :* ]] || return 1
+    port="${rest#:}"
+  else
+    [[ "$authority" == *:* ]] || return 1
+    host="${authority%%:*}"
+    port="${authority#*:}"
+  fi
+
+  [[ -n "$host" && "$port" == <-> ]] || return 1
+  (( port >= 1 && port <= 65535 )) || return 1
+
+  PROXY_HOST="$host"
+  PROXY_PORT="$port"
+}
+
+detect_system_proxy() {
+  local output http_enabled http_host http_port https_enabled https_host https_port
+  output=$(/usr/sbin/scutil --proxy 2>/dev/null) || return 0
+
+  http_enabled=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPEnable[[:space:]]*:/ {print $3; exit}')
+  http_host=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPProxy[[:space:]]*:/ {print $3; exit}')
+  http_port=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPPort[[:space:]]*:/ {print $3; exit}')
+  https_enabled=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPSEnable[[:space:]]*:/ {print $3; exit}')
+  https_host=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPSProxy[[:space:]]*:/ {print $3; exit}')
+  https_port=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPSPort[[:space:]]*:/ {print $3; exit}')
+
+  if [[ "$https_enabled" == '1' && -n "$https_host" && -n "$https_port" && "$https_port" != '0' ]]; then
+    HTTPS_PROXY_URL="http://${https_host}:${https_port}"
+  fi
+  if [[ "$http_enabled" == '1' && -n "$http_host" && -n "$http_port" && "$http_port" != '0' ]]; then
+    HTTP_PROXY_URL="http://${http_host}:${http_port}"
+  fi
+}
+
+configure_proxy() {
+  local override="${ANTIGRAVITY_PROXY_URL:-}"
+  local app_override=''
+  local no_proxy_override=''
+  local no_auto_detect="${ANTIGRAVITY_NO_AUTO_DETECT:-0}"
+
+  if [[ -r "$CONFIG_FILE" ]]; then
+    [[ -n "$override" ]] || override="$(config_value ANTIGRAVITY_PROXY_URL)"
+    app_override="$(config_value ANTIGRAVITY_APP)"
+    no_proxy_override="$(config_value ANTIGRAVITY_NO_PROXY)"
+    local configured_no_auto
+    configured_no_auto="$(config_value ANTIGRAVITY_NO_AUTO_DETECT)"
+    [[ -n "$configured_no_auto" ]] && no_auto_detect="$configured_no_auto"
+  fi
+
+  [[ -n "$app_override" && -z "$ANTIGRAVITY_APP_FROM_ENV" ]] && ANTIGRAVITY_APP="$app_override"
+  [[ -n "$no_proxy_override" && -z "$NO_PROXY_FROM_ENV" ]] && NO_PROXY_VALUE="$no_proxy_override"
+
+  if [[ -n "$override" ]]; then
+    override="$(normalize_proxy_url "$override")"
+    HTTP_PROXY_URL="$override"
+    HTTPS_PROXY_URL="$override"
+    GRPC_PROXY_URL="$override"
+  elif [[ "$no_auto_detect" != '1' ]]; then
+    detect_system_proxy
+  fi
+
+  [[ -n "$HTTP_PROXY_URL" ]] || HTTP_PROXY_URL="$DEFAULT_PROXY_URL"
+  HTTP_PROXY_URL="$(normalize_proxy_url "$HTTP_PROXY_URL")"
+  [[ -n "$HTTPS_PROXY_URL" ]] || HTTPS_PROXY_URL="$HTTP_PROXY_URL"
+  HTTPS_PROXY_URL="$(normalize_proxy_url "$HTTPS_PROXY_URL")"
+  [[ -n "$GRPC_PROXY_URL" ]] || GRPC_PROXY_URL="$HTTPS_PROXY_URL"
+  GRPC_PROXY_URL="$(normalize_proxy_url "$GRPC_PROXY_URL")"
+
+  parse_proxy_url "$HTTPS_PROXY_URL"
+}
+
+proxy_ready() {
+  /usr/bin/nc -z -G 1 "$PROXY_HOST" "$PROXY_PORT" >/dev/null 2>&1
+}
+
+proxy_healthy_once() {
+  local code rc
+  code=$(/usr/bin/curl \
+    --http1.1 \
+    --proxy "$HTTPS_PROXY_URL" \
+    --noproxy '' \
+    --silent --show-error \
+    --output /dev/null \
+    --write-out '%{http_code}' \
+    --connect-timeout 4 \
+    --max-time 8 \
+    "$HEALTH_URL" 2>/dev/null)
+  rc=$?
+
+  [[ $rc -eq 0 ]] || return 1
+  [[ "$code" == <-> ]] || return 1
+  (( code >= 200 && code < 500 ))
+}
+
+main_pid() {
+  local executable="${ANTIGRAVITY_APP%/}/Contents/MacOS/Antigravity"
+  /usr/bin/pgrep -f "^${executable}( |$)" 2>/dev/null | /usr/bin/head -n 1
+}
+
+main_has_proxy_env() {
+  local pid="$1" env
+  env=$(/bin/ps eww -p "$pid" 2>/dev/null | /usr/bin/tr ' ' '\n')
+  printf '%s\n' "$env" | /usr/bin/grep -qx "HTTP_PROXY=${HTTP_PROXY_URL}" \
+    && printf '%s\n' "$env" | /usr/bin/grep -qx "HTTPS_PROXY=${HTTPS_PROXY_URL}"
+}
+
+main_is_blank() {
+  local log="$HOME/Library/Logs/Antigravity/main.log"
+  local last_start last_timeout
+  [[ -f "$log" ]] || return 1
+
+  last_start=$(/usr/bin/grep -n 'Starting app (v' "$log" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1)
+  last_timeout=$(/usr/bin/grep -n 'Failed to load URL: https://127\.0\.0\.1:' "$log" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1)
+
+  [[ -n "$last_timeout" && ( -z "$last_start" || last_timeout -gt $last_start ) ]]
+}
+
+wait_for_main_exit() {
+  local attempt
+  for attempt in {1..10}; do
+    [[ -z "$(main_pid)" ]] && return 0
+    /bin/sleep 1
+  done
+  return 1
+}
+
+print_config() {
+  printf 'ANTIGRAVITY_APP=%s\n' "$ANTIGRAVITY_APP"
+  printf 'HTTP_PROXY=%s\n' "$HTTP_PROXY_URL"
+  printf 'HTTPS_PROXY=%s\n' "$HTTPS_PROXY_URL"
+  printf 'GRPC_PROXY=%s\n' "$GRPC_PROXY_URL"
+  printf 'NO_PROXY=%s\n' "$NO_PROXY_VALUE"
+  printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
+}
+
+if ! configure_proxy; then
+  notify "未找到有效的代理地址。请检查 ${CONFIG_FILE} 中的 ANTIGRAVITY_PROXY_URL。"
+  exit 1
+fi
+
+if (( PRINT_CONFIG )); then
+  print_config
+  exit 0
+fi
+
+if ! proxy_ready; then
+  notify "代理 ${PROXY_HOST}:${PROXY_PORT} 未运行。请先打开对应的代理客户端。"
+  exit 1
+fi
+
+healthy=0
+for attempt in {1..$HEALTH_ATTEMPTS}; do
+  if proxy_healthy_once; then
+    healthy=1
+    break
+  fi
+  (( attempt < HEALTH_ATTEMPTS )) && /bin/sleep "$HEALTH_DELAY_SECONDS"
+done
+
+if (( healthy == 0 )); then
+  notify "代理 ${PROXY_HOST}:${PROXY_PORT} 已监听，但 Google 连接暂不可用。请切换节点后重试。"
+  exit 1
+fi
+
+if (( DRY_RUN )); then
+  print_config
+  exit 0
+fi
+
+pid="$(main_pid)"
+if [[ -n "$pid" ]]; then
+  if main_has_proxy_env "$pid" && ! main_is_blank; then
+    /usr/bin/open -a "$ANTIGRAVITY_APP"
+    exit 0
+  fi
+
+  if main_is_blank; then
+    notify "检测到 Antigravity 窗口加载失败，正在自动重启。"
+  else
+    notify "检测到 Antigravity 旧实例的代理与当前代理不一致，正在重启。"
+  fi
+  /usr/bin/osascript -e 'tell application id "com.google.antigravity" to quit' >/dev/null 2>&1 || true
+
+  if ! wait_for_main_exit; then
+    pid="$(main_pid)"
+    [[ -n "$pid" ]] && /bin/kill -TERM "$pid" 2>/dev/null || true
+    if ! wait_for_main_exit; then
+      notify "Antigravity 旧实例未能退出，请手动退出后重新打开此启动器。"
+      exit 1
+    fi
+  fi
+fi
+
+exec /usr/bin/open \
+  --env "HTTP_PROXY=${HTTP_PROXY_URL}" \
+  --env "HTTPS_PROXY=${HTTPS_PROXY_URL}" \
+  --env "GRPC_PROXY=${GRPC_PROXY_URL}" \
+  --env "NO_PROXY=${NO_PROXY_VALUE}" \
+  -a "$ANTIGRAVITY_APP" \
+  --args --no-proxy-server

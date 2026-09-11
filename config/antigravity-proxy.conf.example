@@ -1,0 +1,14 @@
+# Copy this file to ~/.config/antigravity-proxy.conf and edit as needed.
+
+# Manual proxy override. Takes precedence over macOS system proxy detection.
+# Use an HTTP/Mixed port when possible.
+# ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890'
+
+# Optional: path to the official Antigravity application.
+# ANTIGRAVITY_APP='/Applications/Antigravity.app'
+
+# Optional: hosts that must bypass the proxy.
+# ANTIGRAVITY_NO_PROXY='localhost,127.0.0.1,::1,.local'
+
+# Optional: disable automatic macOS system proxy detection.
+# ANTIGRAVITY_NO_AUTO_DETECT='1'
