@@ -16,6 +16,7 @@ rm -rf "$APP_PATH"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 /usr/bin/install -m 755 "$ROOT_DIR/src/AntigravityProxy" "$CONTENTS/MacOS/AntigravityProxy"
 /usr/bin/install -m 644 "$ROOT_DIR/packaging/Info.plist" "$CONTENTS/Info.plist"
+/usr/bin/install -m 644 "$ROOT_DIR/packaging/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 /usr/bin/plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$CONTENTS/Info.plist"
 /usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION" "$CONTENTS/Info.plist"
 

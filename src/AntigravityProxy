@@ -3,7 +3,7 @@
 # Electron stays direct/local; only language_server inherits the proxy env.
 set -u
 
-VERSION='1.0.2'
+VERSION='1.0.3'
 ANTIGRAVITY_APP_FROM_ENV="${ANTIGRAVITY_APP:-}"
 NO_PROXY_FROM_ENV="${ANTIGRAVITY_NO_PROXY:-}"
 ANTIGRAVITY_APP="${ANTIGRAVITY_APP:-/Applications/Antigravity.app}"

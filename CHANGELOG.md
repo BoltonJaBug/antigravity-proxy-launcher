@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3
+
+- Added a dedicated app icon inspired by Antigravity's visual language while
+  keeping the distributed launcher artwork distinct from Google's official
+  application icon.
+
 ## 1.0.2
 
 - Fixed a false "Antigravity did not finish starting" dialog when

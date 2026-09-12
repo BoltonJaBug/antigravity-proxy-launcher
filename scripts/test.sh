@@ -10,8 +10,10 @@ LAUNCHER="$APP/Contents/MacOS/AntigravityProxy"
 OUTPUT_DIR="$TEST_OUTPUT" "$ROOT_DIR/scripts/build-app.sh"
 /usr/bin/plutil -lint "$APP/Contents/Info.plist"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
+[[ -f "$APP/Contents/Resources/AppIcon.icns" ]]
+[[ "$(/usr/bin/plutil -extract CFBundleIconFile raw -o - "$APP/Contents/Info.plist")" == 'AppIcon.icns' ]]
 
-"$LAUNCHER" --version | /usr/bin/grep -qx '1.0.2'
+"$LAUNCHER" --version | /usr/bin/grep -qx '1.0.3'
 
 TEST_CONFIG="$TEST_OUTPUT/nonexistent.conf"
 config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890' "$LAUNCHER" --print-config)

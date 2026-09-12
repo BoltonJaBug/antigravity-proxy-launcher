@@ -6,6 +6,10 @@
 	<string>Antigravity Proxy</string>
 	<key>CFBundleExecutable</key>
 	<string>AntigravityProxy</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.antigravity-proxy.launcher</string>
 	<key>CFBundleInfoDictionaryVersion</key>
