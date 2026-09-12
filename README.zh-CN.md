@@ -15,7 +15,8 @@ Antigravity 由 Electron 界面进程和 Go 编写的 `language_server` 组成�
 - 自动读取 macOS 当前的 HTTP/HTTPS 系统代理。
 - 只让 Antigravity 的 `language_server` 使用代理。
 - 使用 `--no-proxy-server` 启动 Electron，保证本地界面直连。
-- 启动前检查 Google 连通性，减少空白窗口。
+- 启动前检查代理出口地区和 Google 连通性，减少空白窗口。
+- 启动后监测日志；地区不支持、代理超时或界面加载失败时显示明确弹窗。
 - 不需要 TUN。
 - 不修改系统代理，也不修改官方 Antigravity 应用。
 
@@ -104,6 +105,10 @@ socks5h://
 | `ANTIGRAVITY_CONFIG_FILE` | 指定配置文件路径。 |
 | `ANTIGRAVITY_NO_PROXY` | 覆盖 `NO_PROXY`。 |
 | `ANTIGRAVITY_NO_AUTO_DETECT=1` | 禁用系统代理自动检测。 |
+| `ANTIGRAVITY_REGION_CHECK=0` | 禁用启动前代理出口地区检查。 |
+| `ANTIGRAVITY_UNSUPPORTED_REGIONS` | 覆盖已知不支持地区列表，逗号分隔。 |
+| `ANTIGRAVITY_REGION_CHECK_TIMEOUT` | 地区检查超时秒数，默认 `8`。 |
+| `ANTIGRAVITY_STARTUP_CHECK_SECONDS` | 启动后日志监测时长，默认 `35` 秒。 |
 
 ### 诊断
 
@@ -118,6 +123,14 @@ socks5h://
 ```zsh
 "/Applications/Antigravity Proxy.app/Contents/MacOS/AntigravityProxy" --dry-run
 ```
+
+检查当前代理出口国家或地区：
+
+```zsh
+"/Applications/Antigravity Proxy.app/Contents/MacOS/AntigravityProxy" --check-region
+```
+
+输出 `PROXY_COUNTRY=US` 表示出口为美国。退出码 `0` 表示地区检查通过；退出码 `2` 表示检测到已知不支持的地区。
 
 ## 工作原理
 
@@ -142,6 +155,10 @@ https://daily-cloudcode-pa.googleapis.com/
 
 如果端口不可用或 Google 不可达，启动器不会启动 Antigravity。
 
+通过 Google 检查后，启动器会查询一次代理出口的国家或地区。如果检测到中国大陆、中国香港、俄罗斯等已知不支持的地区，会先显示警告，允许取消启动或仍然继续。
+
+Antigravity 启动后，启动器会在后台监测 `main.log` 和 `language_server.log` 最多 35 秒。发现地区不支持、`ERR_TIMED_OUT`、`i/o timeout` 或界面加载失败时，会弹出中文提示，说明应检查节点还是代理连接。
+
 ## 常见问题
 
 ### 提示代理不可用
@@ -151,9 +168,17 @@ https://daily-cloudcode-pa.googleapis.com/
 - 如果客户端没有设置 macOS 系统代理，请创建 `~/.config/antigravity-proxy.conf`。
 - 修改端口后重新打开 Antigravity Proxy。
 
+### 提示“User location is not supported”
+
+- 当前代理出口地区不受 Antigravity API 支持，香港节点也可能出现此提示。
+- 切换到美国、日本或新加坡等支持地区的节点，然后重新打开 `Antigravity Proxy.app`。
+- 地区判断基于代理出口 IP，实际账号资格和节点质量仍取决于代理服务。
+
 ### Antigravity 仍然白屏
 
-- 切换到更稳定的节点。
+- 先按启动器弹窗中的提示处理，不要只反复重启。
+- 如果提示地区不支持，切换到美国、日本或新加坡节点。
+- 如果提示 Google 连接失败，切换到更稳定的节点，并确认代理客户端仍在运行。
 - 优先使用 HTTP/Mixed 端口。
 - 完全退出 Antigravity，再打开 `Antigravity Proxy.app`。
 - 查看 `~/Library/Logs/Antigravity/language_server.log` 中的代理超时或 TLS 错误。
@@ -177,6 +202,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 - 不启用 TUN。
 - 不设置全局环境变量。
 - 启动时最多进行 3 次小型 Google 健康检查请求。
+- 启动前最多进行一次代理出口地区检查请求。
 - Antigravity 仍按原有方式处理认证和保存凭据。
 
 ## 限制
@@ -186,6 +212,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 - 官方应用默认路径为 `/Applications/Antigravity.app`。
 - 发布包默认仅做 ad-hoc 签名，除非在发布流程中加入 Apple Developer ID。
 - 代理本身不稳定时，Antigravity 后台仍可能超时。
+- 地区检查依赖第三方 IP 地理位置结果，无法覆盖 Google 后续增加或调整的所有地区限制。
 
 ## 免责声明
 

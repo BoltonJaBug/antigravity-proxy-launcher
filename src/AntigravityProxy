@@ -3,7 +3,7 @@
 # Electron stays direct/local; only language_server inherits the proxy env.
 set -u
 
-VERSION='1.0.0'
+VERSION='1.0.1'
 ANTIGRAVITY_APP_FROM_ENV="${ANTIGRAVITY_APP:-}"
 NO_PROXY_FROM_ENV="${ANTIGRAVITY_NO_PROXY:-}"
 ANTIGRAVITY_APP="${ANTIGRAVITY_APP:-/Applications/Antigravity.app}"
@@ -13,22 +13,30 @@ CONFIG_FILE="${ANTIGRAVITY_CONFIG_FILE:-$HOME/.config/antigravity-proxy.conf}"
 HEALTH_URL='https://daily-cloudcode-pa.googleapis.com/'
 HEALTH_ATTEMPTS=3
 HEALTH_DELAY_SECONDS=2
+REGION_CHECK_URL="${ANTIGRAVITY_REGION_CHECK_URL:-https://www.cloudflare.com/cdn-cgi/trace}"
+REGION_CHECK_TIMEOUT_SECONDS="${ANTIGRAVITY_REGION_CHECK_TIMEOUT:-8}"
+STARTUP_CHECK_SECONDS="${ANTIGRAVITY_STARTUP_CHECK_SECONDS:-35}"
+REGION_CHECK_ENABLED="${ANTIGRAVITY_REGION_CHECK:-1}"
+UNSUPPORTED_REGIONS="${ANTIGRAVITY_UNSUPPORTED_REGIONS:-CN,HK,MO,RU,BY,IR,KP,SY,CU}"
 
 HTTP_PROXY_URL=''
 HTTPS_PROXY_URL=''
 GRPC_PROXY_URL=''
 PROXY_HOST=''
 PROXY_PORT=''
+PROXY_COUNTRY=''
 DRY_RUN=0
 PRINT_CONFIG=0
+CHECK_REGION=0
 
 usage() {
   cat <<'USAGE'
-Usage: AntigravityProxy [--dry-run | --print-config | --help | --version]
+Usage: AntigravityProxy [--dry-run | --print-config | --check-region | --help | --version]
 
 Options:
   --dry-run       Check the selected proxy and print the environment without launching Antigravity.
   --print-config  Detect and print the proxy environment without network access.
+  --check-region  Check the proxy exit country without launching Antigravity.
   --help          Show this help.
   --version       Print the launcher version.
 USAGE
@@ -38,6 +46,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --print-config) PRINT_CONFIG=1 ;;
+    --check-region) CHECK_REGION=1 ;;
     --help) usage; exit 0 ;;
     --version) printf '%s\n' "$VERSION"; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; usage >&2; exit 2 ;;
@@ -50,6 +59,33 @@ on run argv
   display notification (item 1 of argv) with title "Antigravity Proxy"
 end run
 APPLESCRIPT
+}
+
+show_error() {
+  local message
+  message=$(/usr/bin/printf '%b' "$1")
+  /usr/bin/osascript - "Antigravity Proxy" "$message" >/dev/null 2>&1 <<'APPLESCRIPT' || true
+on run argv
+  display dialog (item 2 of argv) with title (item 1 of argv) buttons {"关闭"} default button "关闭" with icon caution
+end run
+APPLESCRIPT
+}
+
+confirm_region_warning() {
+  local country="$1" region_name="$2" message result
+  message=$(/usr/bin/printf '%s\n\n%s\n%s\n\n%s\n\n%s' \
+    "当前代理出口地区是 ${region_name} (${country})。" \
+    'Antigravity 在已知不支持的地区会返回：' \
+    'User location is not supported for the API use.' \
+    '请把代理客户端切换到美国、日本或新加坡等支持地区的节点，再重新启动。' \
+    '如果仍然继续，Antigravity 很可能继续白屏。')
+  result=$(/usr/bin/osascript - "Antigravity Proxy" "$message" 2>/dev/null <<'APPLESCRIPT'
+on run argv
+  display dialog (item 2 of argv) with title (item 1 of argv) buttons {"取消启动", "仍然继续"} default button "取消启动" cancel button "取消启动" with icon caution
+end run
+APPLESCRIPT
+  ) || return 1
+  [[ "$result" == *'仍然继续'* ]]
 }
 
 config_value() {
@@ -142,11 +178,21 @@ configure_proxy() {
   local app_override=''
   local no_proxy_override=''
   local no_auto_detect="${ANTIGRAVITY_NO_AUTO_DETECT:-0}"
+  local configured_region_url=''
+  local configured_region_timeout=''
+  local configured_startup_check=''
+  local configured_region_check=''
+  local configured_unsupported_regions=''
 
   if [[ -r "$CONFIG_FILE" ]]; then
     [[ -n "$override" ]] || override="$(config_value ANTIGRAVITY_PROXY_URL)"
     app_override="$(config_value ANTIGRAVITY_APP)"
     no_proxy_override="$(config_value ANTIGRAVITY_NO_PROXY)"
+    configured_region_url="$(config_value ANTIGRAVITY_REGION_CHECK_URL)"
+    configured_region_timeout="$(config_value ANTIGRAVITY_REGION_CHECK_TIMEOUT)"
+    configured_startup_check="$(config_value ANTIGRAVITY_STARTUP_CHECK_SECONDS)"
+    configured_region_check="$(config_value ANTIGRAVITY_REGION_CHECK)"
+    configured_unsupported_regions="$(config_value ANTIGRAVITY_UNSUPPORTED_REGIONS)"
     local configured_no_auto
     configured_no_auto="$(config_value ANTIGRAVITY_NO_AUTO_DETECT)"
     [[ -n "$configured_no_auto" ]] && no_auto_detect="$configured_no_auto"
@@ -154,6 +200,16 @@ configure_proxy() {
 
   [[ -n "$app_override" && -z "$ANTIGRAVITY_APP_FROM_ENV" ]] && ANTIGRAVITY_APP="$app_override"
   [[ -n "$no_proxy_override" && -z "$NO_PROXY_FROM_ENV" ]] && NO_PROXY_VALUE="$no_proxy_override"
+  [[ -n "$configured_region_url" && -z "${ANTIGRAVITY_REGION_CHECK_URL:-}" ]] && REGION_CHECK_URL="$configured_region_url"
+  [[ -n "$configured_region_timeout" && -z "${ANTIGRAVITY_REGION_CHECK_TIMEOUT:-}" ]] && REGION_CHECK_TIMEOUT_SECONDS="$configured_region_timeout"
+  [[ -n "$configured_startup_check" && -z "${ANTIGRAVITY_STARTUP_CHECK_SECONDS:-}" ]] && STARTUP_CHECK_SECONDS="$configured_startup_check"
+  [[ -n "$configured_region_check" && -z "${ANTIGRAVITY_REGION_CHECK:-}" ]] && REGION_CHECK_ENABLED="$configured_region_check"
+  [[ -n "$configured_unsupported_regions" && -z "${ANTIGRAVITY_UNSUPPORTED_REGIONS:-}" ]] && UNSUPPORTED_REGIONS="$configured_unsupported_regions"
+
+  [[ "$REGION_CHECK_TIMEOUT_SECONDS" == <-> ]] || REGION_CHECK_TIMEOUT_SECONDS=8
+  (( REGION_CHECK_TIMEOUT_SECONDS >= 1 )) || REGION_CHECK_TIMEOUT_SECONDS=8
+  [[ "$STARTUP_CHECK_SECONDS" == <-> ]] || STARTUP_CHECK_SECONDS=35
+  (( STARTUP_CHECK_SECONDS >= 5 )) || STARTUP_CHECK_SECONDS=35
 
   if [[ -n "$override" ]]; then
     override="$(normalize_proxy_url "$override")"
@@ -197,6 +253,103 @@ proxy_healthy_once() {
   (( code >= 200 && code < 500 ))
 }
 
+proxy_country() {
+  local trace country
+  [[ "$REGION_CHECK_ENABLED" == '1' ]] || return 1
+  [[ "$REGION_CHECK_TIMEOUT_SECONDS" == <-> ]] || REGION_CHECK_TIMEOUT_SECONDS=8
+
+  trace=$(/usr/bin/curl \
+    --http1.1 \
+    --proxy "$HTTPS_PROXY_URL" \
+    --noproxy '' \
+    --silent --show-error \
+    --connect-timeout 4 \
+    --max-time "$REGION_CHECK_TIMEOUT_SECONDS" \
+    "$REGION_CHECK_URL" 2>/dev/null) || return 1
+
+  country=$(printf '%s\n' "$trace" | /usr/bin/awk -F= '$1 == "loc" { print toupper($2); exit }')
+  [[ "$country" == [A-Z][A-Z] ]] || return 1
+  PROXY_COUNTRY="$country"
+}
+
+region_is_unsupported() {
+  local region
+  for region in ${(s:,:)UNSUPPORTED_REGIONS}; do
+    region="${region//[[:space:]]/}"
+    [[ "${region:u}" == "$PROXY_COUNTRY" ]] && return 0
+  done
+  return 1
+}
+
+region_display_name() {
+  case "$PROXY_COUNTRY" in
+    CN) printf '中国大陆' ;;
+    HK) printf '中国香港' ;;
+    MO) printf '中国澳门' ;;
+    RU) printf '俄罗斯' ;;
+    BY) printf '白俄罗斯' ;;
+    IR) printf '伊朗' ;;
+    KP) printf '朝鲜' ;;
+    SY) printf '叙利亚' ;;
+    CU) printf '古巴' ;;
+    *) printf '%s' "$PROXY_COUNTRY" ;;
+  esac
+}
+
+log_line_count() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    /usr/bin/wc -l < "$file" | /usr/bin/tr -d ' '
+  else
+    printf '0\n'
+  fi
+}
+
+log_lines_after() {
+  local file="$1" start="$2"
+  [[ -f "$file" ]] || return 0
+  /usr/bin/tail -n "+$((start + 1))" "$file" 2>/dev/null
+}
+
+diagnose_startup() {
+  local main_log="$HOME/Library/Logs/Antigravity/main.log"
+  local server_log="$HOME/Library/Logs/Antigravity/language_server.log"
+  local main_start="$1" server_start="$2"
+  local deadline=$((SECONDS + STARTUP_CHECK_SECONDS))
+  local main_new='' server_new='' started_at=$SECONDS startup_ok=0
+
+  while (( SECONDS < deadline )); do
+    main_new=$(log_lines_after "$main_log" "$main_start")
+    server_new=$(log_lines_after "$server_log" "$server_start")
+
+    if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'user location is not supported|FAILED_PRECONDITION'; then
+      show_error "Antigravity 因代理节点地区不受支持而启动失败。\n\n请切换到美国、日本或新加坡等支持地区的节点，然后重新打开 Antigravity Proxy。"
+      return 1
+    fi
+
+    if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'dial tcp|i/o timeout|ERR_TIMED_OUT|ERR_CONNECTION_(TIMED_OUT|REFUSED|RESET)|Failed to load URL'; then
+      show_error "Antigravity 无法通过代理连接 Google。\n\n请确认代理正在运行、节点可用，并优先使用美国、日本或新加坡节点。完全退出 Antigravity 后重试。\n\n日志：$HOME/Library/Logs/Antigravity/language_server.log"
+      return 1
+    fi
+
+    if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'initialized server successfully|Serving UI bundle from embedded assets'; then
+      [[ -n "$(main_pid)" ]] && startup_ok=1
+    fi
+
+    if (( SECONDS - started_at >= 5 )) && [[ -z "$(main_pid)" ]]; then
+      show_error "Antigravity 主程序启动后已退出，界面未能正常打开。\n\n请确认官方 Antigravity 仍安装在：\n${ANTIGRAVITY_APP}"
+      return 1
+    fi
+
+    /bin/sleep 1
+  done
+
+  if (( startup_ok == 0 )); then
+    show_error "Antigravity 在 ${STARTUP_CHECK_SECONDS} 秒内没有完成界面启动。\n\n这通常表示当前节点速度较慢、代理连接不稳定，或 Antigravity 后端暂时不可用。请切换节点后重试。\n\n如果只是启动较慢，可以重新打开启动器再等一会儿；也可在配置文件中增大 ANTIGRAVITY_STARTUP_CHECK_SECONDS。"
+    return 1
+  fi
+}
+
 main_pid() {
   local executable="${ANTIGRAVITY_APP%/}/Contents/MacOS/Antigravity"
   /usr/bin/pgrep -f "^${executable}( |$)" 2>/dev/null | /usr/bin/head -n 1
@@ -235,6 +388,11 @@ print_config() {
   printf 'HTTPS_PROXY=%s\n' "$HTTPS_PROXY_URL"
   printf 'GRPC_PROXY=%s\n' "$GRPC_PROXY_URL"
   printf 'NO_PROXY=%s\n' "$NO_PROXY_VALUE"
+  printf 'REGION_CHECK=%s\n' "$REGION_CHECK_ENABLED"
+  printf 'REGION_CHECK_URL=%s\n' "$REGION_CHECK_URL"
+  printf 'REGION_CHECK_TIMEOUT=%s\n' "$REGION_CHECK_TIMEOUT_SECONDS"
+  printf 'UNSUPPORTED_REGIONS=%s\n' "$UNSUPPORTED_REGIONS"
+  printf 'STARTUP_CHECK_SECONDS=%s\n' "$STARTUP_CHECK_SECONDS"
   printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
 }
 
@@ -249,7 +407,7 @@ if (( PRINT_CONFIG )); then
 fi
 
 if ! proxy_ready; then
-  notify "代理 ${PROXY_HOST}:${PROXY_PORT} 未运行。请先打开对应的代理客户端。"
+  show_error "代理 ${PROXY_HOST}:${PROXY_PORT} 未运行。\n\n请先打开代理客户端，确认 HTTP/Mixed 端口已启用，然后重新打开 Antigravity Proxy。"
   exit 1
 fi
 
@@ -263,13 +421,27 @@ for attempt in {1..$HEALTH_ATTEMPTS}; do
 done
 
 if (( healthy == 0 )); then
-  notify "代理 ${PROXY_HOST}:${PROXY_PORT} 已监听，但 Google 连接暂不可用。请切换节点后重试。"
+  show_error "代理 ${PROXY_HOST}:${PROXY_PORT} 已监听，但无法连接 Google。\n\n请切换节点，确认节点支持 Google 与 Antigravity，然后重新打开 Antigravity Proxy。"
+  exit 1
+fi
+
+if (( CHECK_REGION )); then
+  if proxy_country; then
+    printf 'PROXY_COUNTRY=%s\n' "$PROXY_COUNTRY"
+    region_is_unsupported && exit 2
+    exit 0
+  fi
+  printf 'PROXY_COUNTRY=unknown\n'
   exit 1
 fi
 
 if (( DRY_RUN )); then
   print_config
   exit 0
+fi
+
+if proxy_country && region_is_unsupported; then
+  confirm_region_warning "$PROXY_COUNTRY" "$(region_display_name)" || exit 1
 fi
 
 pid="$(main_pid)"
@@ -296,10 +468,17 @@ if [[ -n "$pid" ]]; then
   fi
 fi
 
-exec /usr/bin/open \
+main_log="$HOME/Library/Logs/Antigravity/main.log"
+server_log="$HOME/Library/Logs/Antigravity/language_server.log"
+main_log_start=$(log_line_count "$main_log")
+server_log_start=$(log_line_count "$server_log")
+
+/usr/bin/open \
   --env "HTTP_PROXY=${HTTP_PROXY_URL}" \
   --env "HTTPS_PROXY=${HTTPS_PROXY_URL}" \
   --env "GRPC_PROXY=${GRPC_PROXY_URL}" \
   --env "NO_PROXY=${NO_PROXY_VALUE}" \
   -a "$ANTIGRAVITY_APP" \
   --args --no-proxy-server
+
+diagnose_startup "$main_log_start" "$server_log_start"

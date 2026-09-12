@@ -12,3 +12,16 @@
 
 # Optional: disable automatic macOS system proxy detection.
 # ANTIGRAVITY_NO_AUTO_DETECT='1'
+
+# Optional: check the proxy exit country before launch (default: enabled).
+# Known unsupported regions trigger a visible warning instead of a blank window.
+# ANTIGRAVITY_REGION_CHECK='1'
+
+# Optional: comma-separated override for known unsupported regions.
+# ANTIGRAVITY_UNSUPPORTED_REGIONS='CN,HK,MO,RU,BY,IR,KP,SY,CU'
+
+# Optional: timeout for the proxy exit-region check, in seconds.
+# ANTIGRAVITY_REGION_CHECK_TIMEOUT='8'
+
+# Optional: how long to watch Antigravity logs for startup failures, in seconds.
+# ANTIGRAVITY_STARTUP_CHECK_SECONDS='35'
