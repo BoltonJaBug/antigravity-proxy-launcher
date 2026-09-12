@@ -12,9 +12,9 @@ OUTPUT_DIR="$TEST_OUTPUT" "$ROOT_DIR/scripts/build-app.sh"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
 [[ -f "$APP/Contents/Resources/AppIcon.icns" ]]
 [[ "$(/usr/bin/plutil -extract CFBundleIconFile raw -o - "$APP/Contents/Info.plist")" == 'AppIcon.icns' ]]
-[[ "$(/usr/bin/plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" == 'true' ]]
+[[ "$(/usr/bin/plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" == 'false' ]]
 
-"$LAUNCHER" --version | /usr/bin/grep -qx '1.0.4'
+"$LAUNCHER" --version | /usr/bin/grep -qx '1.0.5'
 
 TEST_CONFIG="$TEST_OUTPUT/nonexistent.conf"
 config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890' "$LAUNCHER" --print-config)
@@ -62,5 +62,34 @@ rotated_first=$(log_first_line "$ROTATED_LOG")
 printf 'new launch\ninitialized server successfully\n' > "$ROTATED_LOG"
 rotated_output=$(log_lines_since "$ROTATED_LOG" "$rotated_start" "$rotated_first")
 printf '%s\n' "$rotated_output" | /usr/bin/grep -qx 'initialized server successfully'
+
+# Regression test: a successful startup must exit the monitor immediately
+# rather than waiting for the full diagnostic timeout.
+eval "$(/usr/bin/awk '
+  /^diagnose_startup\(\)/ { capture=1 }
+  /^main_pid\(\)/ { capture=0 }
+  capture { print }
+' "$ROOT_DIR/src/AntigravityProxy")"
+
+mkdir -p "$TEST_OUTPUT/startup-test/Library/Logs/Antigravity"
+STARTUP_TEST_HOME="$TEST_OUTPUT/startup-test"
+printf 'Starting app (v2.12.2)\n' > "$STARTUP_TEST_HOME/Library/Logs/Antigravity/main.log"
+printf 'old server log\n' > "$STARTUP_TEST_HOME/Library/Logs/Antigravity/language_server.log"
+(
+  HOME="$STARTUP_TEST_HOME"
+  STARTUP_CHECK_SECONDS=4
+  main_pid() { printf '12345\n'; }
+  show_error() { printf 'unexpected startup error\n' >&2; return 1; }
+
+  main_start=$(log_line_count "$HOME/Library/Logs/Antigravity/main.log")
+  main_first=$(log_first_line "$HOME/Library/Logs/Antigravity/main.log")
+  server_start=$(log_line_count "$HOME/Library/Logs/Antigravity/language_server.log")
+  server_first=$(log_first_line "$HOME/Library/Logs/Antigravity/language_server.log")
+  printf 'initialized server successfully\n' > "$HOME/Library/Logs/Antigravity/language_server.log"
+
+  started_at=$SECONDS
+  diagnose_startup "$main_start" "$main_first" "$server_start" "$server_first"
+  (( SECONDS - started_at < 3 ))
+)
 
 printf 'All tests passed.\n'

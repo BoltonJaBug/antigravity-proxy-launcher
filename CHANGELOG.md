@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.5
+
+- Restore the launcher's Dock icon while Antigravity is starting.
+- Stop startup monitoring and the Dock animation immediately once Antigravity's
+  UI is ready, instead of waiting for the full diagnostic timeout.
+
 ## 1.0.4
 
 - Run the launcher as a background UI element so macOS no longer keeps its
