@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.4
+
+- Run the launcher as a background UI element so macOS no longer keeps its
+  Dock icon bouncing while proxy and startup diagnostics are running.
+
 ## 1.0.3
 
 - Added a dedicated app icon inspired by Antigravity's visual language while
