@@ -157,7 +157,7 @@ https://daily-cloudcode-pa.googleapis.com/
 
 If the proxy port is unavailable or Google is unreachable, Antigravity is not launched.
 
-After the Google check, the launcher makes one proxy exit-region request. If the result is a known unsupported region, such as mainland China, Hong Kong, or Russia, it shows a warning and lets the user cancel or continue.
+After the Google check, the launcher makes one proxy exit-region request. If the result is a known unsupported region, such as mainland China, Hong Kong, or Russia, it shows a warning and lets the user cancel or continue. This check is only a risk warning: nodes in regions such as Hong Kong can still work, so the actual Antigravity API requests and startup logs are authoritative.
 
 After Antigravity starts, the launcher watches `main.log` and `language_server.log` for up to 35 seconds. Unsupported-region errors, `ERR_TIMED_OUT`, `i/o timeout`, and UI load failures produce an actionable dialog instead of a silent blank window.
 

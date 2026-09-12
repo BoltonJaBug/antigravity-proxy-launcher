@@ -3,7 +3,7 @@
 # Electron stays direct/local; only language_server inherits the proxy env.
 set -u
 
-VERSION='1.0.1'
+VERSION='1.0.2'
 ANTIGRAVITY_APP_FROM_ENV="${ANTIGRAVITY_APP:-}"
 NO_PROXY_FROM_ENV="${ANTIGRAVITY_NO_PROXY:-}"
 ANTIGRAVITY_APP="${ANTIGRAVITY_APP:-/Applications/Antigravity.app}"
@@ -305,22 +305,46 @@ log_line_count() {
   fi
 }
 
+log_first_line() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  /usr/bin/head -n 1 "$file" 2>/dev/null || true
+}
+
 log_lines_after() {
   local file="$1" start="$2"
   [[ -f "$file" ]] || return 0
   /usr/bin/tail -n "+$((start + 1))" "$file" 2>/dev/null
 }
 
+log_lines_since() {
+  local file="$1" start="$2" first_line="$3"
+  local current_count current_first
+
+  [[ -f "$file" ]] || return 0
+  current_count=$(log_line_count "$file")
+  current_first=$(log_first_line "$file")
+
+  # language_server.log is replaced on every Antigravity launch. If the file
+  # was truncated or replaced, inspect the whole new file instead of relying
+  # on the previous line offset.
+  if [[ "$current_first" != "$first_line" || "$current_count" -lt "$start" ]]; then
+    /bin/cat "$file" 2>/dev/null
+  else
+    log_lines_after "$file" "$start"
+  fi
+}
+
 diagnose_startup() {
   local main_log="$HOME/Library/Logs/Antigravity/main.log"
   local server_log="$HOME/Library/Logs/Antigravity/language_server.log"
-  local main_start="$1" server_start="$2"
+  local main_start="$1" main_first="$2" server_start="$3" server_first="$4"
   local deadline=$((SECONDS + STARTUP_CHECK_SECONDS))
   local main_new='' server_new='' started_at=$SECONDS startup_ok=0
 
   while (( SECONDS < deadline )); do
-    main_new=$(log_lines_after "$main_log" "$main_start")
-    server_new=$(log_lines_after "$server_log" "$server_start")
+    main_new=$(log_lines_since "$main_log" "$main_start" "$main_first")
+    server_new=$(log_lines_since "$server_log" "$server_start" "$server_first")
 
     if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'user location is not supported|FAILED_PRECONDITION'; then
       show_error "Antigravity 因代理节点地区不受支持而启动失败。\n\n请切换到美国、日本或新加坡等支持地区的节点，然后重新打开 Antigravity Proxy。"
@@ -471,7 +495,9 @@ fi
 main_log="$HOME/Library/Logs/Antigravity/main.log"
 server_log="$HOME/Library/Logs/Antigravity/language_server.log"
 main_log_start=$(log_line_count "$main_log")
+main_log_first=$(log_first_line "$main_log")
 server_log_start=$(log_line_count "$server_log")
+server_log_first=$(log_first_line "$server_log")
 
 /usr/bin/open \
   --env "HTTP_PROXY=${HTTP_PROXY_URL}" \
@@ -481,4 +507,4 @@ server_log_start=$(log_line_count "$server_log")
   -a "$ANTIGRAVITY_APP" \
   --args --no-proxy-server
 
-diagnose_startup "$main_log_start" "$server_log_start"
+diagnose_startup "$main_log_start" "$main_log_first" "$server_log_start" "$server_log_first"

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2
+
+- Fixed a false "Antigravity did not finish starting" dialog when
+  `language_server.log` had been replaced and its new line count was still
+  below the previous launch's line count.
+- Added a regression test for the rotated log scenario.
+
 ## 1.0.1
 
 - Added a proxy exit-region check before launch.
