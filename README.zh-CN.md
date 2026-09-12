@@ -42,7 +42,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 ## 从源码构建
 
 ```zsh
-git clone https://github.com/YOUR_USERNAME/antigravity-proxy-launcher.git
+git clone https://github.com/BoltonJaBug/antigravity-proxy-launcher.git
 cd antigravity-proxy-launcher
 make test
 make build

@@ -44,7 +44,7 @@ Releases are ad-hoc signed unless the repository owner configures Apple Develope
 ## Build from source
 
 ```zsh
-git clone https://github.com/YOUR_USERNAME/antigravity-proxy-launcher.git
+git clone https://github.com/BoltonJaBug/antigravity-proxy-launcher.git
 cd antigravity-proxy-launcher
 make test
 make build
