@@ -57,6 +57,20 @@ Install into `~/Applications`:
 make install
 ```
 
+### Menu bar preview
+
+An independent menu bar prototype is available for validating background takeover when the official Antigravity icon is opened directly:
+
+```zsh
+make test-menu
+make build-menu
+open "build-menu/Antigravity Proxy Menu.app"
+```
+
+Run `make install-menu` to install the preview into `~/Applications` when testing the login item.
+
+The preview does not replace the stable `Antigravity Proxy.app`. See [docs/menubar-preview.zh-CN.md](docs/menubar-preview.zh-CN.md) for the validation flow and current limitations (Chinese).
+
 ## Configuration
 
 ### Automatic detection

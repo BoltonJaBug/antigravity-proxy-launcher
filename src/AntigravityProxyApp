@@ -1,0 +1,10 @@
+#!/bin/zsh
+set -eu
+
+HERE="${0:A:h}"
+
+if (( $# == 0 )); then
+  exec "$HERE/AntigravityProxyMenu"
+fi
+
+exec "$HERE/../Resources/AntigravityProxy" "$@"

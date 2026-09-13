@@ -1,4 +1,6 @@
 build/
+build-menu/
+build-menu-test/
 dist/
 .DS_Store
 *.zip

@@ -55,6 +55,20 @@ open "build/Antigravity Proxy.app"
 make install
 ```
 
+### 菜单栏常驻版预览
+
+仓库中已经包含一版独立的菜单栏常驻原型，用于验证“后台接管直接启动的官方 Antigravity”：
+
+```zsh
+make test-menu
+make build-menu
+open "build-menu/Antigravity Proxy Menu.app"
+```
+
+需要验证登录项时可执行 `make install-menu`，安装位置为 `~/Applications/Antigravity Proxy Menu.app`。
+
+该预览版不会覆盖现有的 `Antigravity Proxy.app`。验证步骤、行为和已知限制见 [docs/menubar-preview.zh-CN.md](docs/menubar-preview.zh-CN.md)。
+
 ## 配置
 
 ### 自动检测

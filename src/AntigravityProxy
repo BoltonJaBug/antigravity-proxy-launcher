@@ -28,15 +28,19 @@ PROXY_COUNTRY=''
 DRY_RUN=0
 PRINT_CONFIG=0
 CHECK_REGION=0
+STATUS_MODE=0
+AUTO_RECOVER=0
 
 usage() {
   cat <<'USAGE'
-Usage: AntigravityProxy [--dry-run | --print-config | --check-region | --help | --version]
+Usage: AntigravityProxy [--dry-run | --print-config | --check-region | --status | --auto-recover | --help | --version]
 
 Options:
   --dry-run       Check the selected proxy and print the environment without launching Antigravity.
   --print-config  Detect and print the proxy environment without network access.
   --check-region  Check the proxy exit country without launching Antigravity.
+  --status        Print the current Antigravity process and proxy state.
+  --auto-recover  Restart Antigravity with the selected proxy when needed.
   --help          Show this help.
   --version       Print the launcher version.
 USAGE
@@ -47,6 +51,8 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=1 ;;
     --print-config) PRINT_CONFIG=1 ;;
     --check-region) CHECK_REGION=1 ;;
+    --status) STATUS_MODE=1 ;;
+    --auto-recover) AUTO_RECOVER=1 ;;
     --help) usage; exit 0 ;;
     --version) printf '%s\n' "$VERSION"; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; usage >&2; exit 2 ;;
@@ -54,6 +60,7 @@ for arg in "$@"; do
 done
 
 notify() {
+  [[ "${ANTIGRAVITY_SUPPRESS_NOTIFICATIONS:-0}" == '1' ]] && return 0
   /usr/bin/osascript - "$1" >/dev/null 2>&1 <<'APPLESCRIPT' || true
 on run argv
   display notification (item 1 of argv) with title "Antigravity Proxy"
@@ -64,6 +71,11 @@ APPLESCRIPT
 show_error() {
   local message
   message=$(/usr/bin/printf '%b' "$1")
+  if (( AUTO_RECOVER )); then
+    notify "$message"
+    printf 'AUTO_RECOVER_ERROR_BEGIN\n%s\nAUTO_RECOVER_ERROR_END\n' "$message"
+    return 1
+  fi
   /usr/bin/osascript - "Antigravity Proxy" "$message" >/dev/null 2>&1 <<'APPLESCRIPT' || true
 on run argv
   display dialog (item 2 of argv) with title (item 1 of argv) buttons {"关闭"} default button "关闭" with icon caution
@@ -73,6 +85,7 @@ APPLESCRIPT
 
 confirm_region_warning() {
   local country="$1" region_name="$2" message result
+  (( AUTO_RECOVER )) && return 0
   message=$(/usr/bin/printf '%s\n\n%s\n%s\n\n%s\n\n%s' \
     "当前代理出口地区是 ${region_name} (${country})。" \
     'Antigravity 在已知不支持的地区会返回：' \
@@ -400,6 +413,25 @@ main_is_blank() {
   [[ -n "$last_timeout" && ( -z "$last_start" || last_timeout -gt $last_start ) ]]
 }
 
+print_runtime_status() {
+  local pid='' has_proxy_env=0 blank=0 ready=0
+
+  pid="$(main_pid)"
+  if [[ -n "$pid" ]]; then
+    main_has_proxy_env "$pid" && has_proxy_env=1
+    main_is_blank && blank=1
+  fi
+  proxy_ready && ready=1
+
+  printf 'PID=%s\n' "$pid"
+  printf 'HAS_PROXY_ENV=%s\n' "$has_proxy_env"
+  printf 'MAIN_BLANK=%s\n' "$blank"
+  printf 'PROXY_READY=%s\n' "$ready"
+  printf 'PROXY_URL=%s\n' "$HTTPS_PROXY_URL"
+  printf 'APP_PATH=%s\n' "$ANTIGRAVITY_APP"
+  printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
+}
+
 wait_for_main_exit() {
   local attempt
   for attempt in {1..10}; do
@@ -424,12 +456,17 @@ print_config() {
 }
 
 if ! configure_proxy; then
-  notify "未找到有效的代理地址。请检查 ${CONFIG_FILE} 中的 ANTIGRAVITY_PROXY_URL。"
+  show_error "未找到有效的代理地址。请检查 ${CONFIG_FILE} 中的 ANTIGRAVITY_PROXY_URL。"
   exit 1
 fi
 
 if (( PRINT_CONFIG )); then
   print_config
+  exit 0
+fi
+
+if (( STATUS_MODE )); then
+  print_runtime_status
   exit 0
 fi
 
@@ -489,7 +526,7 @@ if [[ -n "$pid" ]]; then
     pid="$(main_pid)"
     [[ -n "$pid" ]] && /bin/kill -TERM "$pid" 2>/dev/null || true
     if ! wait_for_main_exit; then
-      notify "Antigravity 旧实例未能退出，请手动退出后重新打开此启动器。"
+      show_error "Antigravity 旧实例未能退出，请手动退出后重新打开此启动器。"
       exit 1
     fi
   fi
