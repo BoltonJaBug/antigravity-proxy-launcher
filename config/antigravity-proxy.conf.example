@@ -1,8 +1,9 @@
 # Copy this file to ~/.config/antigravity-proxy.conf and edit as needed.
 
 # Manual proxy override. Takes precedence over macOS system proxy detection.
-# Use an HTTP/Mixed port when possible.
-# ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890'
+# Use the actual HTTP/Mixed port shown by your proxy client. The port below is
+# only an example and is not a project default.
+# ANTIGRAVITY_PROXY_URL='http://127.0.0.1:33210'
 
 # Optional: path to the official Antigravity application.
 # ANTIGRAVITY_APP='/Applications/Antigravity.app'
@@ -25,3 +26,9 @@
 
 # Optional: how long to watch Antigravity logs for startup failures, in seconds.
 # ANTIGRAVITY_STARTUP_CHECK_SECONDS='35'
+
+# Optional: endpoint used by the menu bar preview to show the proxy exit IP.
+# ANTIGRAVITY_IP_INFO_URL='http://ip-api.com/json/?fields=status,message,query,country,regionName,city,isp,org,as,asname,mobile,proxy,hosting&lang=zh-CN'
+
+# Optional: timeout for the proxy exit IP query, in seconds.
+# ANTIGRAVITY_IP_INFO_TIMEOUT='6'

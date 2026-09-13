@@ -37,7 +37,7 @@ This launcher:
 xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 ```
 
-4. Always launch Antigravity through `Antigravity Proxy.app`, not the official icon directly.
+4. Enable **Launch at Login** from the menu. While the menu bar app is running, opening the official Antigravity icon directly is supported and will be taken over automatically.
 
 Releases are ad-hoc signed unless the repository owner configures Apple Developer ID signing and notarization.
 
@@ -57,19 +57,30 @@ Install into `~/Applications`:
 make install
 ```
 
-### Menu bar preview
+### Persistent menu bar app
 
-An independent menu bar prototype is available for validating background takeover when the official Antigravity icon is opened directly:
+`Antigravity Proxy.app` is a persistent menu bar app that can take over Antigravity when the official icon is opened directly:
 
 ```zsh
-make test-menu
-make build-menu
-open "build-menu/Antigravity Proxy Menu.app"
+make test
+make build
+open "build/Antigravity Proxy.app"
 ```
 
-Run `make install-menu` to install the preview into `~/Applications` when testing the login item.
+`make install` installs it as `~/Applications/Antigravity Proxy.app`. Its **Launch at Login** command uses the macOS login-item mechanism.
 
-The preview does not replace the stable `Antigravity Proxy.app`. See [docs/menubar-preview.zh-CN.md](docs/menubar-preview.zh-CN.md) for the validation flow and current limitations (Chinese).
+The legacy `make test-menu`, `make build-menu`, and `make install-menu` commands remain as compatibility aliases for the same stable app. See the [menu bar validation guide](docs/menubar-preview.zh-CN.md) for the validation flow (Chinese).
+
+The menu bar app includes an **IP Info** submenu. Its top-level summary shows the proxy exit IP, location, and network type; the submenu contains ISP/organization, ASN route, and data-source details. The network type is a third-party database heuristic:
+
+```text
+mobile=true                 -> Mobile network
+proxy=true                  -> Proxy / VPN
+hosting=true                -> Data center / hosting
+all false                   -> General broadband (residential or business)
+```
+
+`General broadband` does not prove that the connection is a residential home line; free IP databases cannot reliably distinguish residential from business access.
 
 ## Configuration
 
@@ -77,11 +88,7 @@ The preview does not replace the stable `Antigravity Proxy.app`. See [docs/menub
 
 By default, the launcher runs `scutil --proxy` and uses the active macOS HTTP/HTTPS proxy. This works when the proxy client enables the macOS system proxy.
 
-If detection fails, it falls back to:
-
-```text
-http://127.0.0.1:7890
-```
+The launcher does not assume that the proxy uses port `7890`. If no system proxy is detected, it asks the user to enable the proxy client's system-proxy integration or configure the actual port manually.
 
 ### Manual override
 
@@ -91,10 +98,10 @@ Create:
 ~/.config/antigravity-proxy.conf
 ```
 
-Example:
+For example, when the proxy client reports HTTP/Mixed port `33210`:
 
 ```zsh
-ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890'
+ANTIGRAVITY_PROXY_URL='http://127.0.0.1:33210'
 ```
 
 A complete example is available at [config/antigravity-proxy.conf.example](config/antigravity-proxy.conf.example).
@@ -125,6 +132,8 @@ An HTTP/Mixed port is usually the most compatible choice.
 | `ANTIGRAVITY_UNSUPPORTED_REGIONS` | Override the comma-separated unsupported-region list. |
 | `ANTIGRAVITY_REGION_CHECK_TIMEOUT` | Region-check timeout in seconds. Default: `8`. |
 | `ANTIGRAVITY_STARTUP_CHECK_SECONDS` | Log-monitoring window after launch. Default: `35`. |
+| `ANTIGRAVITY_IP_INFO_URL` | IP info endpoint. Defaults to `http://ip-api.com/`. |
+| `ANTIGRAVITY_IP_INFO_TIMEOUT` | IP info request timeout in seconds. Default: `6`. |
 
 ### Diagnostics
 
@@ -147,6 +156,14 @@ Check the proxy exit country or region:
 ```
 
 For example, `PROXY_COUNTRY=US` means the proxy exits in the United States. Exit code `0` means the region check passed; exit code `2` means a known unsupported region was detected.
+
+Show the current proxy exit IP information:
+
+```zsh
+"/Applications/Antigravity Proxy.app/Contents/MacOS/AntigravityProxy" --ip-info
+```
+
+The structured output includes `IP_ADDRESS`, `IP_LOCATION`, `IP_PROVIDER`, `IP_ASN`, `IP_NETWORK_TYPE`, and `IP_INFO_SOURCE`. This command contacts a third-party IP information service and exits with code `1` when the lookup fails.
 
 ## How it works
 
@@ -201,7 +218,7 @@ After Antigravity starts, the launcher watches `main.log` and `language_server.l
 
 ### An old Antigravity instance is running
 
-The launcher detects an existing instance that does not have the current proxy environment and restarts it automatically. If it cannot quit the old instance, quit Antigravity manually and retry.
+When the menu bar app is already running, it automatically takes over a newly launched, unproxied Antigravity instance. If Antigravity was already running when the menu bar app starts, the user is prompted to save their work first. A confirmed restart requests a normal application quit and never force-terminates an instance that does not exit.
 
 ### macOS says the app cannot be verified
 
@@ -219,6 +236,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 - It does not set proxy variables globally.
 - It performs one small health-check request, retried at most three times at launch.
 - It performs at most one proxy exit-region request before launch.
+- The menu bar app refreshes the proxy exit IP at most once every 5 minutes; selecting the manual refresh action performs an immediate lookup.
 - Antigravity still handles its own authentication and stores its own credentials normally.
 
 ## Limitations
@@ -229,6 +247,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 - Release builds are ad-hoc signed unless Developer ID signing is added to the release workflow.
 - Proxy instability can still cause Antigravity's backend to time out after launch.
 - Region checks depend on third-party IP geolocation and cannot cover every restriction Google may add or change.
+- IP information and network classification depend on third-party databases such as `ip-api.com`; locations, providers, and mobile/hosting flags can be inaccurate, and `General broadband` does not guarantee a residential home connection.
 
 ## Disclaimer
 

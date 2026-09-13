@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0
+
+- Promote the persistent menu bar app to the stable `Antigravity Proxy.app`.
+- Automatically take over Antigravity instances launched after the menu app.
+- Prompt before safely restarting an instance that was already running.
+- Add low-frequency status refresh, proxy exit IP/location details, and login-item support.
+- Keep the previous menu-specific build and install commands as compatibility aliases.
+
 ## 1.0.5
 
 - Restore the launcher's Dock icon while Antigravity is starting.

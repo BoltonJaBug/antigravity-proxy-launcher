@@ -35,6 +35,75 @@ private struct RuntimeStatus {
     }
 }
 
+private struct IPInfo {
+    let isSuccess: Bool
+    let address: String
+    let location: String
+    let provider: String
+    let asn: String
+    let networkType: String
+    let source: String
+    let error: String
+
+    init?(output: String) {
+        var values: [String: String] = [:]
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            values[String(parts[0])] = String(parts[1])
+        }
+
+        let status = values["IP_INFO_STATUS"] ?? ""
+        guard !status.isEmpty else { return nil }
+
+        self.isSuccess = status == "success"
+        self.address = values["IP_ADDRESS"] ?? "未知"
+        self.location = values["IP_LOCATION"] ?? "未知"
+        self.provider = values["IP_PROVIDER"] ?? "未知"
+        self.asn = values["IP_ASN"] ?? "未知"
+        self.networkType = values["IP_NETWORK_TYPE"] ?? "未知"
+        self.source = values["IP_INFO_SOURCE"] ?? "未知"
+        self.error = values["IP_INFO_ERROR"] ?? "无法获取代理出口 IP 信息。"
+    }
+
+    static func failure(_ message: String) -> IPInfo {
+        IPInfo(
+            isSuccess: false,
+            address: "未知",
+            location: "未知",
+            provider: "未知",
+            asn: "未知",
+            networkType: "未知",
+            source: "未知",
+            error: message
+        )
+    }
+
+    private init(
+        isSuccess: Bool,
+        address: String,
+        location: String,
+        provider: String,
+        asn: String,
+        networkType: String,
+        source: String,
+        error: String
+    ) {
+        self.isSuccess = isSuccess
+        self.address = address
+        self.location = location
+        self.provider = provider
+        self.asn = asn
+        self.networkType = networkType
+        self.source = source
+        self.error = error
+    }
+
+    var menuTitle: String {
+        isSuccess ? "IP 信息: \(address) · \(location) · \(networkType)" : "IP 信息: 获取失败"
+    }
+}
+
 private final class FileLogger {
     private let queue = DispatchQueue(label: "io.github.antigravity-proxy.menubar.log")
     private let fileURL: URL
@@ -74,6 +143,7 @@ private enum ServiceState {
     case managed
     case launching
     case autoRecovering
+    case restartRequired
     case failed(String)
     case error(String)
 
@@ -89,6 +159,8 @@ private enum ServiceState {
             return "正在启动 / 重启 Antigravity…"
         case .autoRecovering:
             return "检测到未代理的 Antigravity，正在自动接管…"
+        case .restartRequired:
+            return "Antigravity 需要安全重启以应用代理"
         case .failed(let message):
             return "启动失败：\(message)"
         case .error(let message):
@@ -102,6 +174,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var statusMenuItem: NSMenuItem!
     private var proxyMenuItem: NSMenuItem!
+    private var ipInfoMenuItem: NSMenuItem!
+    private var ipAddressMenuItem: NSMenuItem!
+    private var ipLocationMenuItem: NSMenuItem!
+    private var ipProviderMenuItem: NSMenuItem!
+    private var ipASNMenuItem: NSMenuItem!
+    private var ipNetworkTypeMenuItem: NSMenuItem!
+    private var ipSourceMenuItem: NSMenuItem!
+    private var ipErrorMenuItem: NSMenuItem!
+    private var ipRefreshMenuItem: NSMenuItem!
     private var failureDetailMenuItem: NSMenuItem!
     private var primaryMenuItem: NSMenuItem!
     private var loginMenuItem: NSMenuItem!
@@ -109,17 +190,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var workspaceObservers: [NSObjectProtocol] = []
     private let activeRefreshInterval: TimeInterval = 1
     private let directLaunchObservationTimeout: TimeInterval = 6
+    private let passiveRefreshInterval: TimeInterval = 20
+    private let ipInfoRefreshInterval: TimeInterval = 300
+    private let ipInfoFailureRetryInterval: TimeInterval = 30
 
     private var engineURL: URL?
     private var statusProcess: Process?
+    private var ipInfoProcess: Process?
     private var operationProcess: Process?
     private var state: ServiceState = .checking
     private var lastProxyURL = "正在检测…"
+    private var lastConfigFile = ""
     private var lastStatusError: String?
+    private var lastProxyReady = false
+    private var lastIPInfo: IPInfo?
+    private var lastIPInfoAttemptAt: Date?
 
     private var watchedPID: String?
     private var watchedSince: Date?
     private var launchObservationStartedAt: Date?
+    private var observedDirectLaunchPID: String?
+    private var promptedExistingPID: String?
     private var autoRecoverySuppressed = false
     private var lastFailureDetail: String?
 
@@ -140,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         statusProcess?.terminate()
+        ipInfoProcess?.terminate()
         operationProcess?.terminate()
     }
 
@@ -150,6 +242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         refreshLoginItemState()
+        refreshStatus()
+        refreshIPInfoIfNeeded()
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -187,11 +281,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             watchedPID = nil
             watchedSince = nil
             launchObservationStartedAt = operationProcess == nil ? Date() : nil
+            observedDirectLaunchPID = operationProcess == nil ? String(application.processIdentifier) : nil
             if operationProcess == nil {
                 state = .checking
                 updateInterface()
             }
         } else {
+            if observedDirectLaunchPID == String(application.processIdentifier) {
+                observedDirectLaunchPID = nil
+            }
+            if promptedExistingPID == String(application.processIdentifier) {
+                promptedExistingPID = nil
+            }
             let startupWasPending: Bool
             if operationProcess == nil, launchObservationStartedAt != nil {
                 switch state {
@@ -239,6 +340,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         proxyMenuItem = NSMenuItem(title: "代理: 正在检测…", action: nil, keyEquivalent: "")
         proxyMenuItem.isEnabled = false
         menu.addItem(proxyMenuItem)
+
+        ipInfoMenuItem = NSMenuItem(title: "IP 信息: 等待代理…", action: nil, keyEquivalent: "")
+        let ipInfoMenu = NSMenu()
+        ipInfoMenu.autoenablesItems = false
+
+        ipAddressMenuItem = Self.makeDisabledMenuItem(title: "IP 地址: 等待代理…")
+        ipInfoMenu.addItem(ipAddressMenuItem)
+        ipLocationMenuItem = Self.makeDisabledMenuItem(title: "位置: 等待代理…")
+        ipInfoMenu.addItem(ipLocationMenuItem)
+        ipProviderMenuItem = Self.makeDisabledMenuItem(title: "服务商: 等待代理…")
+        ipInfoMenu.addItem(ipProviderMenuItem)
+        ipASNMenuItem = Self.makeDisabledMenuItem(title: "线路: 等待代理…")
+        ipInfoMenu.addItem(ipASNMenuItem)
+        ipNetworkTypeMenuItem = Self.makeDisabledMenuItem(title: "网络类型: 等待代理…")
+        ipInfoMenu.addItem(ipNetworkTypeMenuItem)
+        ipSourceMenuItem = Self.makeDisabledMenuItem(title: "数据来源: ip-api.com")
+        ipInfoMenu.addItem(ipSourceMenuItem)
+        ipErrorMenuItem = Self.makeDisabledMenuItem(title: "")
+        ipErrorMenuItem.isHidden = true
+        ipInfoMenu.addItem(ipErrorMenuItem)
+
+        ipInfoMenu.addItem(.separator())
+        ipRefreshMenuItem = NSMenuItem(title: "刷新 IP 信息", action: #selector(refreshIPInfo(_:)), keyEquivalent: "")
+        ipRefreshMenuItem.target = self
+        ipRefreshMenuItem.isEnabled = true
+        ipInfoMenu.addItem(ipRefreshMenuItem)
+
+        ipInfoMenuItem.submenu = ipInfoMenu
+        menu.addItem(ipInfoMenuItem)
 
         failureDetailMenuItem = NSMenuItem(title: "查看失败详情", action: #selector(showFailureDetail(_:)), keyEquivalent: "")
         failureDetailMenuItem.target = self
@@ -289,15 +419,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.toolTip = state.menuTitle
         statusMenuItem.title = state.menuTitle
         proxyMenuItem.title = "代理: \(lastProxyURL)"
+        updateIPInfoInterface()
         failureDetailMenuItem.isHidden = lastFailureDetail == nil
         if operationProcess != nil {
             primaryMenuItem.title = "停止当前任务"
         } else if autoRecoverySuppressed {
             primaryMenuItem.title = "重新尝试启动 Antigravity"
+        } else if case .restartRequired = state {
+            primaryMenuItem.title = "安全重启 Antigravity 以应用代理"
         } else {
             primaryMenuItem.title = "启动 / 重启 Antigravity"
         }
         primaryMenuItem.isEnabled = engineURL != nil
+    }
+
+    private func updateIPInfoInterface() {
+        if let info = lastIPInfo {
+            ipInfoMenuItem.title = info.menuTitle
+            if info.isSuccess {
+                ipAddressMenuItem.title = "IP 地址: \(info.address)"
+                ipLocationMenuItem.title = "位置: \(info.location)"
+                ipProviderMenuItem.title = "服务商: \(info.provider)"
+                ipASNMenuItem.title = "线路: \(info.asn)"
+                ipNetworkTypeMenuItem.title = "网络类型: \(info.networkType)"
+                ipSourceMenuItem.title = "数据来源: \(info.source)"
+                ipAddressMenuItem.isHidden = false
+                ipLocationMenuItem.isHidden = false
+                ipProviderMenuItem.isHidden = false
+                ipASNMenuItem.isHidden = false
+                ipNetworkTypeMenuItem.isHidden = false
+                ipSourceMenuItem.isHidden = false
+                ipErrorMenuItem.isHidden = true
+            } else {
+                ipAddressMenuItem.title = "IP 信息获取失败"
+                ipErrorMenuItem.title = "原因: \(info.error)"
+                ipAddressMenuItem.isHidden = false
+                ipErrorMenuItem.isHidden = false
+                ipLocationMenuItem.isHidden = true
+                ipProviderMenuItem.isHidden = true
+                ipASNMenuItem.isHidden = true
+                ipNetworkTypeMenuItem.isHidden = true
+                ipSourceMenuItem.isHidden = true
+            }
+        } else {
+            ipInfoMenuItem.title = lastProxyReady ? "IP 信息: 正在获取…" : "IP 信息: 等待代理…"
+            ipAddressMenuItem.title = "IP 地址: 尚未获取"
+            ipAddressMenuItem.isHidden = false
+            ipLocationMenuItem.isHidden = true
+            ipProviderMenuItem.isHidden = true
+            ipASNMenuItem.isHidden = true
+            ipNetworkTypeMenuItem.isHidden = true
+            ipSourceMenuItem.isHidden = true
+            ipErrorMenuItem.isHidden = true
+        }
+
+        if ipInfoProcess == nil {
+            ipRefreshMenuItem.title = "刷新 IP 信息"
+            ipRefreshMenuItem.isEnabled = true
+        } else {
+            ipRefreshMenuItem.title = "正在刷新 IP 信息…"
+            ipRefreshMenuItem.isEnabled = false
+        }
+    }
+
+    private static func makeDisabledMenuItem(title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
     }
 
     private func refreshLoginItemState() {
@@ -347,6 +535,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func refreshIPInfoIfNeeded(force: Bool = false) {
+        guard ipInfoProcess == nil, let engineURL else { return }
+
+        if !force, let lastIPInfoAttemptAt {
+            let interval = lastIPInfo?.isSuccess == true
+                ? ipInfoRefreshInterval
+                : ipInfoFailureRetryInterval
+            guard Date().timeIntervalSince(lastIPInfoAttemptAt) >= interval else { return }
+        }
+
+        lastIPInfoAttemptAt = Date()
+        let (process, pipe) = makeEngineProcess(engineURL: engineURL, arguments: ["--ip-info"])
+        ipInfoProcess = process
+        updateInterface()
+
+        process.terminationHandler = { [weak self] process in
+            let output = Self.readOutput(from: pipe)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.ipInfoProcess === process {
+                    self.ipInfoProcess = nil
+                }
+
+                if let info = IPInfo(output: output) {
+                    self.lastIPInfo = info
+                    if info.isSuccess {
+                        self.logger.write("IP info: \(info.address) | \(info.location) | \(info.provider) | \(info.networkType)")
+                    } else {
+                        self.logger.write("IP info failed: \(info.error)")
+                    }
+                } else {
+                    let message = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.lastIPInfo = .failure(message.isEmpty ? "IP 信息查询未返回有效结果。" : message)
+                    self.logger.write("IP info failed: \(message)")
+                }
+
+                self.updateInterface()
+            }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            ipInfoProcess = nil
+            lastIPInfo = .failure("无法运行 IP 信息查询：\(error.localizedDescription)")
+            logger.write("Failed to run IP info check: \(error.localizedDescription)")
+            updateInterface()
+        }
+    }
+
     private func handleStatusOutput(_ output: String, exitCode: Int32) {
         guard exitCode == 0, let status = RuntimeStatus(output: output) else {
             state = .error("状态检查失败")
@@ -357,10 +595,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         lastStatusError = nil
-        if lastProxyURL != "正在检测…" && lastProxyURL != status.proxyURL {
+        let proxyChanged = lastProxyURL != "正在检测…" && lastProxyURL != status.proxyURL
+        if proxyChanged {
             logger.write("Proxy configuration changed: \(status.proxyURL)")
         }
         lastProxyURL = status.proxyURL
+        lastProxyReady = status.proxyIsReady
+        lastConfigFile = status.configFile
+
+        if proxyChanged {
+            lastIPInfo = nil
+            lastIPInfoAttemptAt = nil
+            refreshIPInfoIfNeeded(force: true)
+        } else if status.proxyIsReady {
+            refreshIPInfoIfNeeded()
+        }
 
         if autoRecoverySuppressed {
             state = .failed(Self.shortFailureSummary(lastFailureDetail ?? "上次启动失败"))
@@ -371,6 +620,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if status.pid.isEmpty {
             watchedPID = nil
             watchedSince = nil
+            observedDirectLaunchPID = nil
+            promptedExistingPID = nil
             if let launchObservationStartedAt {
                 if Date().timeIntervalSince(launchObservationStartedAt) < directLaunchObservationTimeout {
                     state = .checking
@@ -384,6 +635,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             state = .waitingForProxy(proxyReady: status.proxyIsReady)
             updateInterface()
+            scheduleRefresh(after: passiveRefreshInterval)
             return
         }
 
@@ -395,6 +647,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             autoRecoverySuppressed = false
             state = .managed
             updateInterface()
+            scheduleRefresh(after: passiveRefreshInterval)
             return
         }
 
@@ -417,7 +670,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        beginOperation(arguments: ["--auto-recover"], automatic: true)
+        if observedDirectLaunchPID == status.pid {
+            beginOperation(arguments: ["--auto-recover"], automatic: true)
+            return
+        }
+
+        state = .restartRequired
+        updateInterface()
+        guard promptedExistingPID != status.pid else { return }
+        promptedExistingPID = status.pid
+        if confirmSafeRestart() {
+            beginOperation(arguments: ["--noninteractive"], automatic: false)
+        }
     }
 
     @objc private func primaryAction(_ sender: Any?) {
@@ -430,7 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         watchedPID = nil
         watchedSince = nil
         logger.write("Starting Antigravity retry from menu")
-        beginOperation(arguments: ["--auto-recover"], automatic: false)
+        beginOperation(arguments: ["--noninteractive"], automatic: false)
     }
 
     @objc private func checkProxy(_ sender: Any?) {
@@ -440,6 +704,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func refreshNow(_ sender: Any?) {
         refreshStatus()
+    }
+
+    @objc private func refreshIPInfo(_ sender: Any?) {
+        refreshIPInfoIfNeeded(force: true)
     }
 
     private func beginOperation(arguments: [String], automatic: Bool, isProxyCheck: Bool = false) {
@@ -468,9 +736,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let output = Self.readOutput(from: pipe)
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.operationProcess === process {
-                    self.operationProcess = nil
-                }
+                guard self.operationProcess === process else { return }
+                self.operationProcess = nil
 
                 let code = process.terminationStatus
                 let cleanOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -492,6 +759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         self.logger.write("Automatic recovery completed")
                     }
                     self.state = .checking
+                    self.refreshIPInfoIfNeeded(force: true)
                     self.scheduleRefresh(after: 1.5)
                 } else {
                     let reason = Self.autoRecoverError(from: output)
@@ -519,8 +787,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func stopCurrentOperation() {
         guard let process = operationProcess else { return }
         logger.write("Stopping current operation")
-        process.terminate()
         operationProcess = nil
+        process.terminate()
         state = .checking
         updateInterface()
         scheduleRefresh(after: 1)
@@ -627,8 +895,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openConfig(_ sender: Any?) {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/antigravity-proxy.conf")
+        let configuredPath = (lastConfigFile as NSString).expandingTildeInPath
+        let url = configuredPath.isEmpty
+            ? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/antigravity-proxy.conf")
+            : URL(fileURLWithPath: configuredPath)
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             if !FileManager.default.fileExists(atPath: url.path) {
@@ -658,6 +928,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.alertStyle = .informational
         alert.addButton(withTitle: "好")
         alert.runModal()
+    }
+
+    private func confirmSafeRestart() -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "需要重启 Antigravity"
+        alert.informativeText = "检测到 Antigravity 已经在运行，但没有使用当前代理。请先保存正在编辑的内容。现在重启会先请求 Antigravity 正常退出；如果应用没有退出，不会强制终止。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "保存后立即重启")
+        alert.addButton(withTitle: "稍后")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 

@@ -37,7 +37,7 @@ Antigravity 由 Electron 界面进程和 Go 编写的 `language_server` 组成�
 xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 ```
 
-4. 以后始终通过 `Antigravity Proxy.app` 启动，不要直接点击官方 Antigravity 图标。
+4. 建议在菜单中开启“登录时启动”。只要菜单栏 AP 正在运行，之后直接点击官方 Antigravity 图标也会被自动接管。
 
 ## 从源码构建
 
@@ -55,19 +55,30 @@ open "build/Antigravity Proxy.app"
 make install
 ```
 
-### 菜单栏常驻版预览
+### 常驻菜单栏
 
-仓库中已经包含一版独立的菜单栏常驻原型，用于验证“后台接管直接启动的官方 Antigravity”：
+`Antigravity Proxy.app` 是常驻菜单栏应用，可以后台接管直接启动的官方 Antigravity：
 
 ```zsh
-make test-menu
-make build-menu
-open "build-menu/Antigravity Proxy Menu.app"
+make test
+make build
+open "build/Antigravity Proxy.app"
 ```
 
-需要验证登录项时可执行 `make install-menu`，安装位置为 `~/Applications/Antigravity Proxy Menu.app`。
+运行 `make install` 会安装到 `~/Applications/Antigravity Proxy.app`。菜单中的“登录时启动”使用 macOS 登录项机制。
 
-该预览版不会覆盖现有的 `Antigravity Proxy.app`。验证步骤、行为和已知限制见 [docs/menubar-preview.zh-CN.md](docs/menubar-preview.zh-CN.md)。
+原有的 `make test-menu`、`make build-menu` 和 `make install-menu` 仍作为兼容命令保留，但它们指向同一个正式应用。验证步骤见 [菜单栏版验证说明](docs/menubar-preview.zh-CN.md)。
+
+菜单栏应用包含“IP 信息”子菜单，通过当前代理查询出口 IP。一级菜单摘要直接显示 IP 地址、位置和网络类型，子菜单显示运营商/组织、ASN 线路和数据来源等详情。网络类型是第三方数据库的启发式结果：
+
+```text
+mobile=true                 -> 移动网络
+proxy=true                  -> 代理 / VPN
+hosting=true                -> 数据中心 / 机房
+以上均 false                -> 普通宽带（住宅或企业）
+```
+
+“普通宽带（住宅或企业）”不等于可以确定是家庭宽带；免费 IP 数据库无法可靠区分住宅和企业线路。
 
 ## 配置
 
@@ -75,11 +86,7 @@ open "build-menu/Antigravity Proxy Menu.app"
 
 默认执行 `scutil --proxy`，读取 macOS 当前的 HTTP/HTTPS 系统代理。只要代理客户端开启了系统代理，不同端口也能自动适配。
 
-如果没有检测到系统代理，则回退到：
-
-```text
-http://127.0.0.1:7890
-```
+启动器不会假设代理端口是 `7890`。如果没有检测到系统代理，会提示开启代理客户端的“系统代理”，或者要求手动指定实际端口。
 
 ### 手动指定
 
@@ -89,10 +96,10 @@ http://127.0.0.1:7890
 ~/.config/antigravity-proxy.conf
 ```
 
-例如：
+例如，代理客户端显示 HTTP/Mixed 端口为 `33210`：
 
 ```zsh
-ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890'
+ANTIGRAVITY_PROXY_URL='http://127.0.0.1:33210'
 ```
 
 完整示例见 [config/antigravity-proxy.conf.example](config/antigravity-proxy.conf.example)。
@@ -123,6 +130,8 @@ socks5h://
 | `ANTIGRAVITY_UNSUPPORTED_REGIONS` | 覆盖已知不支持地区列表，逗号分隔。 |
 | `ANTIGRAVITY_REGION_CHECK_TIMEOUT` | 地区检查超时秒数，默认 `8`。 |
 | `ANTIGRAVITY_STARTUP_CHECK_SECONDS` | 启动后日志监测时长，默认 `35` 秒。 |
+| `ANTIGRAVITY_IP_INFO_URL` | IP 信息接口地址，默认使用 `http://ip-api.com/`。 |
+| `ANTIGRAVITY_IP_INFO_TIMEOUT` | IP 信息查询超时秒数，默认 `6`。 |
 
 ### 诊断
 
@@ -145,6 +154,14 @@ socks5h://
 ```
 
 输出 `PROXY_COUNTRY=US` 表示出口为美国。退出码 `0` 表示地区检查通过；退出码 `2` 表示检测到已知不支持的地区。
+
+查看当前代理出口 IP 信息：
+
+```zsh
+"/Applications/Antigravity Proxy.app/Contents/MacOS/AntigravityProxy" --ip-info
+```
+
+输出包含 `IP_ADDRESS`、`IP_LOCATION`、`IP_PROVIDER`、`IP_ASN`、`IP_NETWORK_TYPE` 和 `IP_INFO_SOURCE`。该命令会访问第三方 IP 信息接口；接口不可用时退出码为 `1`。
 
 ## 工作原理
 
@@ -199,7 +216,7 @@ Antigravity 启动后，启动器会在后台监测 `main.log` 和 `language_ser
 
 ### 已经有旧的 Antigravity 进程
 
-如果旧实例没有当前代理环境，启动器会自动退出并重启它；如果无法自动退出，请手动退出 Antigravity 后重试。
+如果先打开菜单栏程序、再直接打开官方 Antigravity，菜单栏程序会自动接管新启动的未代理实例。如果打开菜单栏程序时 Antigravity 已经在运行，程序会先提示保存内容，确认后只请求正常退出；如果应用没有退出，不会使用信号强制终止，以免丢失未保存内容。
 
 ### macOS 提示无法验证应用
 
@@ -217,6 +234,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 - 不设置全局环境变量。
 - 启动时最多进行 3 次小型 Google 健康检查请求。
 - 启动前最多进行一次代理出口地区检查请求。
+- 菜单栏应用最多每 5 分钟查询一次代理出口 IP；手动刷新会立即发起查询。
 - Antigravity 仍按原有方式处理认证和保存凭据。
 
 ## 限制
@@ -227,6 +245,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 - 发布包默认仅做 ad-hoc 签名，除非在发布流程中加入 Apple Developer ID。
 - 代理本身不稳定时，Antigravity 后台仍可能超时。
 - 地区检查依赖第三方 IP 地理位置结果，无法覆盖 Google 后续增加或调整的所有地区限制。
+- IP 信息和网络类型依赖 `ip-api.com` 等第三方数据库，位置、运营商和“移动网络/机房”判断都可能误判；`普通宽带`不保证是家庭宽带。
 
 ## 免责声明
 

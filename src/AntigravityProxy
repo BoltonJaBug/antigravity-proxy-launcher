@@ -3,12 +3,11 @@
 # Electron stays direct/local; only language_server inherits the proxy env.
 set -u
 
-VERSION='1.0.5'
+VERSION='1.1.0'
 ANTIGRAVITY_APP_FROM_ENV="${ANTIGRAVITY_APP:-}"
 NO_PROXY_FROM_ENV="${ANTIGRAVITY_NO_PROXY:-}"
 ANTIGRAVITY_APP="${ANTIGRAVITY_APP:-/Applications/Antigravity.app}"
 NO_PROXY_VALUE="${ANTIGRAVITY_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
-DEFAULT_PROXY_URL='http://127.0.0.1:7890'
 CONFIG_FILE="${ANTIGRAVITY_CONFIG_FILE:-$HOME/.config/antigravity-proxy.conf}"
 HEALTH_URL='https://daily-cloudcode-pa.googleapis.com/'
 HEALTH_ATTEMPTS=3
@@ -18,6 +17,8 @@ REGION_CHECK_TIMEOUT_SECONDS="${ANTIGRAVITY_REGION_CHECK_TIMEOUT:-8}"
 STARTUP_CHECK_SECONDS="${ANTIGRAVITY_STARTUP_CHECK_SECONDS:-35}"
 REGION_CHECK_ENABLED="${ANTIGRAVITY_REGION_CHECK:-1}"
 UNSUPPORTED_REGIONS="${ANTIGRAVITY_UNSUPPORTED_REGIONS:-CN,HK,MO,RU,BY,IR,KP,SY,CU}"
+IP_INFO_URL="${ANTIGRAVITY_IP_INFO_URL:-http://ip-api.com/json/?fields=status,message,query,country,regionName,city,isp,org,as,asname,mobile,proxy,hosting&lang=zh-CN}"
+IP_INFO_TIMEOUT_SECONDS="${ANTIGRAVITY_IP_INFO_TIMEOUT:-6}"
 
 HTTP_PROXY_URL=''
 HTTPS_PROXY_URL=''
@@ -30,16 +31,20 @@ PRINT_CONFIG=0
 CHECK_REGION=0
 STATUS_MODE=0
 AUTO_RECOVER=0
+NONINTERACTIVE=0
+IP_INFO_MODE=0
 
 usage() {
   cat <<'USAGE'
-Usage: AntigravityProxy [--dry-run | --print-config | --check-region | --status | --auto-recover | --help | --version]
+Usage: AntigravityProxy [--dry-run | --print-config | --check-region | --status | --ip-info | --noninteractive | --auto-recover | --help | --version]
 
 Options:
   --dry-run       Check the selected proxy and print the environment without launching Antigravity.
   --print-config  Detect and print the proxy environment without network access.
   --check-region  Check the proxy exit country without launching Antigravity.
   --status        Print the current Antigravity process and proxy state.
+  --ip-info       Print the proxy exit IP, location, provider and network type.
+  --noninteractive  Return machine-readable errors without forcing an existing app to quit.
   --auto-recover  Restart Antigravity with the selected proxy when needed.
   --help          Show this help.
   --version       Print the launcher version.
@@ -52,7 +57,9 @@ for arg in "$@"; do
     --print-config) PRINT_CONFIG=1 ;;
     --check-region) CHECK_REGION=1 ;;
     --status) STATUS_MODE=1 ;;
-    --auto-recover) AUTO_RECOVER=1 ;;
+    --ip-info) IP_INFO_MODE=1 ;;
+    --noninteractive) NONINTERACTIVE=1 ;;
+    --auto-recover) AUTO_RECOVER=1; NONINTERACTIVE=1 ;;
     --help) usage; exit 0 ;;
     --version) printf '%s\n' "$VERSION"; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; usage >&2; exit 2 ;;
@@ -71,7 +78,7 @@ APPLESCRIPT
 show_error() {
   local message
   message=$(/usr/bin/printf '%b' "$1")
-  if (( AUTO_RECOVER )); then
+  if (( NONINTERACTIVE )); then
     notify "$message"
     printf 'AUTO_RECOVER_ERROR_BEGIN\n%s\nAUTO_RECOVER_ERROR_END\n' "$message"
     return 1
@@ -85,7 +92,10 @@ APPLESCRIPT
 
 confirm_region_warning() {
   local country="$1" region_name="$2" message result
-  (( AUTO_RECOVER )) && return 0
+  if (( NONINTERACTIVE )); then
+    show_error "当前代理出口地区是 ${region_name} (${country})。\n\nAntigravity 在该地区可能不支持 API 使用。请切换到美国、日本或新加坡等支持地区的节点后重试。"
+    return 1
+  fi
   message=$(/usr/bin/printf '%s\n\n%s\n%s\n\n%s\n\n%s' \
     "当前代理出口地区是 ${region_name} (${country})。" \
     'Antigravity 在已知不支持的地区会返回：' \
@@ -196,6 +206,8 @@ configure_proxy() {
   local configured_startup_check=''
   local configured_region_check=''
   local configured_unsupported_regions=''
+  local configured_ip_info_url=''
+  local configured_ip_info_timeout=''
 
   if [[ -r "$CONFIG_FILE" ]]; then
     [[ -n "$override" ]] || override="$(config_value ANTIGRAVITY_PROXY_URL)"
@@ -206,6 +218,8 @@ configure_proxy() {
     configured_startup_check="$(config_value ANTIGRAVITY_STARTUP_CHECK_SECONDS)"
     configured_region_check="$(config_value ANTIGRAVITY_REGION_CHECK)"
     configured_unsupported_regions="$(config_value ANTIGRAVITY_UNSUPPORTED_REGIONS)"
+    configured_ip_info_url="$(config_value ANTIGRAVITY_IP_INFO_URL)"
+    configured_ip_info_timeout="$(config_value ANTIGRAVITY_IP_INFO_TIMEOUT)"
     local configured_no_auto
     configured_no_auto="$(config_value ANTIGRAVITY_NO_AUTO_DETECT)"
     [[ -n "$configured_no_auto" ]] && no_auto_detect="$configured_no_auto"
@@ -218,11 +232,15 @@ configure_proxy() {
   [[ -n "$configured_startup_check" && -z "${ANTIGRAVITY_STARTUP_CHECK_SECONDS:-}" ]] && STARTUP_CHECK_SECONDS="$configured_startup_check"
   [[ -n "$configured_region_check" && -z "${ANTIGRAVITY_REGION_CHECK:-}" ]] && REGION_CHECK_ENABLED="$configured_region_check"
   [[ -n "$configured_unsupported_regions" && -z "${ANTIGRAVITY_UNSUPPORTED_REGIONS:-}" ]] && UNSUPPORTED_REGIONS="$configured_unsupported_regions"
+  [[ -n "$configured_ip_info_url" && -z "${ANTIGRAVITY_IP_INFO_URL:-}" ]] && IP_INFO_URL="$configured_ip_info_url"
+  [[ -n "$configured_ip_info_timeout" && -z "${ANTIGRAVITY_IP_INFO_TIMEOUT:-}" ]] && IP_INFO_TIMEOUT_SECONDS="$configured_ip_info_timeout"
 
   [[ "$REGION_CHECK_TIMEOUT_SECONDS" == <-> ]] || REGION_CHECK_TIMEOUT_SECONDS=8
   (( REGION_CHECK_TIMEOUT_SECONDS >= 1 )) || REGION_CHECK_TIMEOUT_SECONDS=8
   [[ "$STARTUP_CHECK_SECONDS" == <-> ]] || STARTUP_CHECK_SECONDS=35
   (( STARTUP_CHECK_SECONDS >= 5 )) || STARTUP_CHECK_SECONDS=35
+  [[ "$IP_INFO_TIMEOUT_SECONDS" == <-> ]] || IP_INFO_TIMEOUT_SECONDS=6
+  (( IP_INFO_TIMEOUT_SECONDS >= 1 )) || IP_INFO_TIMEOUT_SECONDS=6
 
   if [[ -n "$override" ]]; then
     override="$(normalize_proxy_url "$override")"
@@ -233,7 +251,11 @@ configure_proxy() {
     detect_system_proxy
   fi
 
-  [[ -n "$HTTP_PROXY_URL" ]] || HTTP_PROXY_URL="$DEFAULT_PROXY_URL"
+  # Do not guess a conventional port such as 7890. Proxy clients are free to
+  # choose another HTTP/Mixed port, and connecting to an unrelated local
+  # service would be worse than reporting that no proxy was detected.
+  [[ -n "$HTTP_PROXY_URL" || -n "$HTTPS_PROXY_URL" ]] || return 1
+  [[ -n "$HTTP_PROXY_URL" ]] || HTTP_PROXY_URL="$HTTPS_PROXY_URL"
   HTTP_PROXY_URL="$(normalize_proxy_url "$HTTP_PROXY_URL")"
   [[ -n "$HTTPS_PROXY_URL" ]] || HTTPS_PROXY_URL="$HTTP_PROXY_URL"
   HTTPS_PROXY_URL="$(normalize_proxy_url "$HTTPS_PROXY_URL")"
@@ -309,6 +331,117 @@ region_display_name() {
   esac
 }
 
+ip_info_value() {
+  local key="$1"
+  local value
+  value="$(printf '%s' "$IP_INFO_JSON" \
+    | /usr/bin/plutil -extract "$key" raw -o - - 2>/dev/null)" || return 0
+  printf '%s' "$value" | /usr/bin/tr -d '\n\r'
+}
+
+parse_ip_info() {
+  local api_status message country region city isp org asn asname mobile proxy hosting
+  local location_parts provider
+
+  IP_INFO_STATUS='error'
+  IP_ADDRESS='未知'
+  IP_LOCATION='未知'
+  IP_PROVIDER='未知'
+  IP_ASN='未知'
+  IP_NETWORK_TYPE='未知'
+  IP_INFO_SOURCE='ip-api.com'
+  IP_INFO_ERROR=''
+
+  api_status="$(ip_info_value status)"
+  if [[ "$api_status" != 'success' ]]; then
+    message="$(ip_info_value message)"
+    IP_INFO_ERROR="${message:-IP 信息查询失败。}"
+    return 1
+  fi
+
+  country="$(ip_info_value country)"
+  region="$(ip_info_value regionName)"
+  city="$(ip_info_value city)"
+  isp="$(ip_info_value isp)"
+  org="$(ip_info_value org)"
+  asn="$(ip_info_value as)"
+  asname="$(ip_info_value asname)"
+  mobile="$(ip_info_value mobile)"
+  proxy="$(ip_info_value proxy)"
+  hosting="$(ip_info_value hosting)"
+
+  IP_ADDRESS="$(ip_info_value query)"
+  [[ -n "$IP_ADDRESS" ]] || IP_ADDRESS='未知'
+
+  location_parts=()
+  [[ -n "$country" ]] && location_parts+=("$country")
+  [[ -n "$region" && "$region" != "$country" ]] && location_parts+=("$region")
+  [[ -n "$city" && "$city" != "$region" && "$city" != "$country" ]] && location_parts+=("$city")
+  IP_LOCATION="${(j: · :)location_parts}"
+  [[ -n "$IP_LOCATION" ]] || IP_LOCATION='未知'
+
+  provider="$isp"
+  [[ -n "$provider" ]] || provider="$org"
+  [[ -n "$provider" ]] || provider="$asname"
+  IP_PROVIDER="${provider:-未知}"
+  IP_ASN="${asn:-未知}"
+
+  if [[ "$mobile" == 'true' || "$mobile" == '1' ]]; then
+    IP_NETWORK_TYPE='移动网络'
+  elif [[ "$proxy" == 'true' || "$proxy" == '1' ]]; then
+    IP_NETWORK_TYPE='代理 / VPN'
+  elif [[ "$hosting" == 'true' || "$hosting" == '1' ]]; then
+    IP_NETWORK_TYPE='数据中心 / 机房'
+  else
+    IP_NETWORK_TYPE='普通宽带（住宅或企业）'
+  fi
+
+  IP_INFO_STATUS='success'
+  return 0
+}
+
+fetch_ip_info() {
+  local response rc
+  response=$(/usr/bin/curl \
+    --http1.1 \
+    --proxy "$HTTPS_PROXY_URL" \
+    --noproxy '' \
+    --silent --show-error \
+    --header 'Accept: application/json' \
+    --header "User-Agent: AntigravityProxy/$VERSION" \
+    --connect-timeout 4 \
+    --max-time "$IP_INFO_TIMEOUT_SECONDS" \
+    "$IP_INFO_URL" 2>/dev/null)
+  rc=$?
+
+  if [[ $rc -ne 0 || -z "$response" ]]; then
+    IP_INFO_STATUS='error'
+    IP_ADDRESS='未知'
+    IP_LOCATION='未知'
+    IP_PROVIDER='未知'
+    IP_ASN='未知'
+    IP_NETWORK_TYPE='未知'
+    IP_INFO_SOURCE='ip-api.com'
+    IP_INFO_ERROR='无法通过当前代理获取 IP 信息。'
+    return 1
+  fi
+
+  IP_INFO_JSON="$response"
+  parse_ip_info
+}
+
+print_ip_info() {
+  printf 'IP_INFO_STATUS=%s\n' "$IP_INFO_STATUS"
+  printf 'IP_ADDRESS=%s\n' "$IP_ADDRESS"
+  printf 'IP_LOCATION=%s\n' "$IP_LOCATION"
+  printf 'IP_PROVIDER=%s\n' "$IP_PROVIDER"
+  printf 'IP_ASN=%s\n' "$IP_ASN"
+  printf 'IP_NETWORK_TYPE=%s\n' "$IP_NETWORK_TYPE"
+  printf 'IP_INFO_SOURCE=%s\n' "$IP_INFO_SOURCE"
+  [[ -n "$IP_INFO_ERROR" ]] && printf 'IP_INFO_ERROR=%s\n' "$IP_INFO_ERROR"
+  return 0
+}
+
 log_line_count() {
   local file="$1"
   if [[ -f "$file" ]]; then
@@ -354,18 +487,14 @@ diagnose_startup() {
   local main_start="$1" main_first="$2" server_start="$3" server_first="$4"
   local deadline=$((SECONDS + STARTUP_CHECK_SECONDS))
   local main_new='' server_new='' started_at=$SECONDS startup_ok=0
+  local network_error_seen_at=0
 
   while (( SECONDS < deadline )); do
     main_new=$(log_lines_since "$main_log" "$main_start" "$main_first")
     server_new=$(log_lines_since "$server_log" "$server_start" "$server_first")
 
-    if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'user location is not supported|FAILED_PRECONDITION'; then
+    if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'user location is not supported|FAILED_PRECONDITION.*(location|region)|(location|region).*FAILED_PRECONDITION'; then
       show_error "Antigravity 因代理节点地区不受支持而启动失败。\n\n请切换到美国、日本或新加坡等支持地区的节点，然后重新打开 Antigravity Proxy。"
-      return 1
-    fi
-
-    if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'dial tcp|i/o timeout|ERR_TIMED_OUT|ERR_CONNECTION_(TIMED_OUT|REFUSED|RESET)|Failed to load URL'; then
-      show_error "Antigravity 无法通过代理连接 Google。\n\n请确认代理正在运行、节点可用，并优先使用美国、日本或新加坡节点。完全退出 Antigravity 后重试。\n\n日志：$HOME/Library/Logs/Antigravity/language_server.log"
       return 1
     fi
 
@@ -374,6 +503,16 @@ diagnose_startup() {
         startup_ok=1
         break
       fi
+    fi
+
+    if /usr/bin/printf '%s\n%s\n' "$main_new" "$server_new" | /usr/bin/grep -Eiq 'dial tcp|i/o timeout|ERR_TIMED_OUT|ERR_CONNECTION_(TIMED_OUT|REFUSED|RESET)|Failed to load URL'; then
+      (( network_error_seen_at == 0 )) && network_error_seen_at=$SECONDS
+      if (( SECONDS - network_error_seen_at >= 5 )); then
+        show_error "Antigravity 无法通过代理连接 Google。\n\n请确认代理正在运行、节点可用，并优先使用美国、日本或新加坡节点。完全退出 Antigravity 后重试。\n\n日志：$HOME/Library/Logs/Antigravity/language_server.log"
+        return 1
+      fi
+    else
+      network_error_seen_at=0
     fi
 
     if (( SECONDS - started_at >= 5 )) && [[ -z "$(main_pid)" ]]; then
@@ -385,7 +524,11 @@ diagnose_startup() {
   done
 
   if (( startup_ok == 0 )); then
-    show_error "Antigravity 在 ${STARTUP_CHECK_SECONDS} 秒内没有完成界面启动。\n\n这通常表示当前节点速度较慢、代理连接不稳定，或 Antigravity 后端暂时不可用。请切换节点后重试。\n\n如果只是启动较慢，可以重新打开启动器再等一会儿；也可在配置文件中增大 ANTIGRAVITY_STARTUP_CHECK_SECONDS。"
+    if [[ -n "$(main_pid)" ]]; then
+      notify "Antigravity 仍在运行，但未能从日志确认初始化结果。"
+      return 0
+    fi
+    show_error "Antigravity 在 ${STARTUP_CHECK_SECONDS} 秒内没有完成界面启动。\n\n这通常表示当前节点速度较慢、代理连接不稳定，或 Antigravity 后端暂时不可用。请切换节点后重试。"
     return 1
   fi
 }
@@ -404,13 +547,24 @@ main_has_proxy_env() {
 
 main_is_blank() {
   local log="$HOME/Library/Logs/Antigravity/main.log"
-  local last_start last_timeout
+  local server_log="$HOME/Library/Logs/Antigravity/language_server.log"
+  local last_start last_timeout last_ready
   [[ -f "$log" ]] || return 1
 
-  last_start=$(/usr/bin/grep -n 'Starting app (v' "$log" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1)
-  last_timeout=$(/usr/bin/grep -n 'Failed to load URL: https://127\.0\.0\.1:' "$log" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1)
+  # language_server.log is replaced for each launch. A success marker in that
+  # file therefore supersedes an earlier, transient Electron load timeout.
+  if [[ -f "$server_log" ]] \
+    && /usr/bin/grep -Eiq 'initialized server successfully|Serving UI bundle from embedded assets' "$server_log" 2>/dev/null; then
+    return 1
+  fi
 
-  [[ -n "$last_timeout" && ( -z "$last_start" || last_timeout -gt $last_start ) ]]
+  last_start=$(/usr/bin/grep -n 'Starting app (v' "$log" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1 || true)
+  last_timeout=$(/usr/bin/grep -n 'Failed to load URL: https://127\.0\.0\.1:' "$log" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1 || true)
+  last_ready=$(/usr/bin/grep -En 'initialized server successfully|Serving UI bundle from embedded assets' "$log" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1 || true)
+
+  [[ -n "$last_start" && -n "$last_timeout" ]] || return 1
+  (( last_timeout > last_start )) || return 1
+  [[ -z "$last_ready" ]] || (( last_timeout > last_ready ))
 }
 
 print_runtime_status() {
@@ -452,11 +606,13 @@ print_config() {
   printf 'REGION_CHECK_TIMEOUT=%s\n' "$REGION_CHECK_TIMEOUT_SECONDS"
   printf 'UNSUPPORTED_REGIONS=%s\n' "$UNSUPPORTED_REGIONS"
   printf 'STARTUP_CHECK_SECONDS=%s\n' "$STARTUP_CHECK_SECONDS"
+  printf 'IP_INFO_URL=%s\n' "$IP_INFO_URL"
+  printf 'IP_INFO_TIMEOUT=%s\n' "$IP_INFO_TIMEOUT_SECONDS"
   printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
 }
 
 if ! configure_proxy; then
-  show_error "未找到有效的代理地址。请检查 ${CONFIG_FILE} 中的 ANTIGRAVITY_PROXY_URL。"
+  show_error "未检测到有效的 HTTP/HTTPS 代理。\n\n请在代理客户端中开启 macOS 系统代理；启动器会自动读取实际端口。如果客户端不设置系统代理，请在 ${CONFIG_FILE} 中填写 ANTIGRAVITY_PROXY_URL。"
   exit 1
 fi
 
@@ -468,6 +624,28 @@ fi
 if (( STATUS_MODE )); then
   print_runtime_status
   exit 0
+fi
+
+if (( IP_INFO_MODE )); then
+  if ! proxy_ready; then
+    IP_INFO_STATUS='error'
+    IP_ADDRESS='未知'
+    IP_LOCATION='未知'
+    IP_PROVIDER='未知'
+    IP_ASN='未知'
+    IP_NETWORK_TYPE='未知'
+    IP_INFO_SOURCE='ip-api.com'
+    IP_INFO_ERROR="代理 ${PROXY_HOST}:${PROXY_PORT} 未运行。"
+    print_ip_info
+    exit 1
+  fi
+
+  if fetch_ip_info; then
+    print_ip_info
+    exit 0
+  fi
+  print_ip_info
+  exit 1
 fi
 
 if ! proxy_ready; then
@@ -523,6 +701,10 @@ if [[ -n "$pid" ]]; then
   /usr/bin/osascript -e 'tell application id "com.google.antigravity" to quit' >/dev/null 2>&1 || true
 
   if ! wait_for_main_exit; then
+    if (( ! AUTO_RECOVER )); then
+      show_error "Antigravity 尚未退出。请先保存正在编辑的内容并正常退出 Antigravity，然后重新点击启动。为保护未保存内容，本次没有强制终止应用。"
+      exit 1
+    fi
     pid="$(main_pid)"
     [[ -n "$pid" ]] && /bin/kill -TERM "$pid" 2>/dev/null || true
     if ! wait_for_main_exit; then

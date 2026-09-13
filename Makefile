@@ -7,7 +7,7 @@ test:
 	./scripts/test.sh
 
 build-menu:
-	./scripts/build-menubar-app.sh
+	./scripts/build-app.sh
 
 test-menu:
 	./scripts/test-menubar.sh
@@ -16,7 +16,7 @@ install:
 	./scripts/install.sh
 
 install-menu:
-	./scripts/install-menubar.sh
+	./scripts/install.sh
 
 clean:
-	rm -rf build
+	rm -rf build build-menu build-menu-test
