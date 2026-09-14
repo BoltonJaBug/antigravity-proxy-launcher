@@ -2,6 +2,8 @@ build/
 build-menu/
 build-menu-test/
 dist/
+appbackup/
+.workbuddy/
 .DS_Store
 *.zip
 *.dmg

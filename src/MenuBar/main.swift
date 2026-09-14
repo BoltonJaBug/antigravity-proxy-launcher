@@ -219,6 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var ipSourceMenuItem: NSMenuItem!
     private var ipErrorMenuItem: NSMenuItem!
     private var ipRefreshMenuItem: NSMenuItem!
+    private var ipRefreshButton: NSButton!
     private var failureDetailMenuItem: NSMenuItem!
     private var primaryMenuItem: NSMenuItem!
     private var codexMenuItem: NSMenuItem!
@@ -417,8 +418,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ipInfoMenu.addItem(ipErrorMenuItem)
 
         ipInfoMenu.addItem(.separator())
-        ipRefreshMenuItem = NSMenuItem(title: "刷新 IP 信息", action: #selector(refreshIPInfo(_:)), keyEquivalent: "")
-        ipRefreshMenuItem.target = self
+        ipRefreshMenuItem = NSMenuItem()
+        ipRefreshButton = NSButton(title: "刷新 IP 信息", target: self, action: #selector(refreshIPInfo(_:)))
+        ipRefreshButton.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
+        ipRefreshButton.bezelStyle = .inline
+        ipRefreshButton.isBordered = false
+        ipRefreshButton.alignment = .left
+        ipRefreshButton.font = NSFont.menuFont(ofSize: 0)
+        ipRefreshButton.setButtonType(.momentaryChange)
+        ipRefreshButton.autoresizingMask = [.width]
+        ipRefreshMenuItem.view = ipRefreshButton
         ipRefreshMenuItem.isEnabled = true
         ipInfoMenu.addItem(ipRefreshMenuItem)
 
@@ -555,11 +564,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         if ipInfoProcess == nil {
-            ipRefreshMenuItem.title = "刷新 IP 信息"
+            ipRefreshButton.title = "刷新 IP 信息"
+            ipRefreshButton.isEnabled = true
             ipRefreshMenuItem.isEnabled = true
         } else {
-            ipRefreshMenuItem.title = "正在刷新 IP 信息…"
-            ipRefreshMenuItem.isEnabled = false
+            ipRefreshButton.title = "正在刷新 IP 信息…"
+            ipRefreshButton.isEnabled = false
+            ipRefreshMenuItem.isEnabled = true
         }
     }
 

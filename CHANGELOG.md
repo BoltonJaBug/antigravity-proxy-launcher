@@ -7,6 +7,7 @@
 - Require a successful API and Responses WebSocket preflight before restarting Codex.
 - Keep Codex takeover manual so AP never silently interrupts active tasks.
 - Store the latest redacted Codex doctor report under `~/Library/Logs/AntigravityProxy/`.
+- Keep the IP information submenu open while a manual refresh runs and updates in place.
 
 ## 1.1.0
 

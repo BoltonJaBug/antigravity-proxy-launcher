@@ -43,6 +43,8 @@ printf '%s\n' "$status_output" | /usr/bin/grep -qx 'ALL_PROXY_URL=http://127.0.0
 # hidden automatic-recovery path that could terminate the task hosting AP.
 /usr/bin/grep -q 'com.openai.codex' "$ROOT_DIR/src/MenuBar/main.swift"
 /usr/bin/grep -q 'status refresh only' "$ROOT_DIR/src/MenuBar/main.swift"
+/usr/bin/grep -q 'ipRefreshMenuItem.view = ipRefreshButton' "$ROOT_DIR/src/MenuBar/main.swift"
+/usr/bin/grep -q 'ipRefreshButton.isEnabled = false' "$ROOT_DIR/src/MenuBar/main.swift"
 if /usr/bin/grep -q -- '--codex-auto-recover' "$ROOT_DIR/src/MenuBar/main.swift"; then
   printf 'Codex automatic takeover must remain disabled.\n' >&2
   exit 1
