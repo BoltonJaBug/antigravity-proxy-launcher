@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+
+- Add opt-in Codex desktop proxy launch and WebSocket diagnostics.
+- Detect the active macOS SOCKS endpoint and use `socks5h://` for Codex `ALL_PROXY` traffic.
+- Require a successful API and Responses WebSocket preflight before restarting Codex.
+- Keep Codex takeover manual so AP never silently interrupts active tasks.
+- Store the latest redacted Codex doctor report under `~/Library/Logs/AntigravityProxy/`.
+
 ## 1.1.0
 
 - Promote the persistent menu bar app to the stable `Antigravity Proxy.app`.

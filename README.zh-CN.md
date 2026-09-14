@@ -1,10 +1,10 @@
 # Antigravity Proxy Launcher
 
-一个 macOS 小工具，让 Google Antigravity 在不开启 TUN 模式、也不让 Chromium 全局走代理的情况下正常连接网络。
+一个 macOS 小工具，让 Google Antigravity 在不开启 TUN 模式的情况下正常连接网络。
 
 [English](README.md)
 
-> 这不是代理客户端，不提供节点或订阅。它只给 Antigravity 的后台 `language_server` 注入代理环境变量。
+> 这不是代理客户端，不提供节点或订阅。它会为 Antigravity 注入进程级代理环境变量。
 
 ## 解决的问题
 
@@ -13,6 +13,7 @@ Antigravity 由 Electron 界面进程和 Go 编写的 `language_server` 组成�
 启动器会：
 
 - 自动读取 macOS 当前的 HTTP/HTTPS 系统代理。
+- 为 Codex 自动读取 SOCKS 代理，并在安全预检通过后注入 WebSocket 所需的 `ALL_PROXY`。
 - 只让 Antigravity 的 `language_server` 使用代理。
 - 使用 `--no-proxy-server` 启动 Electron，保证本地界面直连。
 - 启动前检查代理出口地区和 Google 连通性，减少空白窗口。
@@ -37,7 +38,7 @@ Antigravity 由 Electron 界面进程和 Go 编写的 `language_server` 组成�
 xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 ```
 
-4. 建议在菜单中开启“登录时启动”。只要菜单栏 AP 正在运行，之后直接点击官方 Antigravity 图标也会被自动接管。
+4. 建议在菜单中开启“登录时启动”。只要菜单栏 AP 正在运行，之后直接点击官方 Antigravity 图标会被自动接管。
 
 ## 从源码构建
 
@@ -58,6 +59,8 @@ make install
 ### 常驻菜单栏
 
 `Antigravity Proxy.app` 是常驻菜单栏应用，可以后台接管直接启动的官方 Antigravity：
+
+Codex 桌面端支持手动“代理模式”启动。AP 会先用 Codex 自带的 doctor 在独立进程中验证 API 和 Responses WebSocket；只有检查通过才会请求 Codex 正常退出。Codex 不会被后台自动接管，避免意外中断正在运行的任务。
 
 ```zsh
 make test
@@ -84,7 +87,7 @@ hosting=true                -> 数据中心 / 机房
 
 ### 自动检测
 
-默认执行 `scutil --proxy`，读取 macOS 当前的 HTTP/HTTPS 系统代理。只要代理客户端开启了系统代理，不同端口也能自动适配。
+默认执行 `scutil --proxy`，读取 macOS 当前的 HTTP/HTTPS 和 SOCKS 系统代理。只要代理客户端开启了系统代理，不同端口也能自动适配。Codex 的 `ALL_PROXY` 优先使用 `socks5h://`，让 WebSocket 域名解析也经过代理。
 
 启动器不会假设代理端口是 `7890`。如果没有检测到系统代理，会提示开启代理客户端的“系统代理”，或者要求手动指定实际端口。
 
@@ -100,6 +103,7 @@ hosting=true                -> 数据中心 / 机房
 
 ```zsh
 ANTIGRAVITY_PROXY_URL='http://127.0.0.1:33210'
+ANTIGRAVITY_SOCKS_PROXY_URL='socks5h://127.0.0.1:33210'
 ```
 
 完整示例见 [config/antigravity-proxy.conf.example](config/antigravity-proxy.conf.example)。
@@ -122,7 +126,9 @@ socks5h://
 | 变量 | 作用 |
 | --- | --- |
 | `ANTIGRAVITY_PROXY_URL` | 手动指定代理地址。 |
+| `ANTIGRAVITY_SOCKS_PROXY_URL` | 手动指定 Codex `ALL_PROXY` 使用的 SOCKS 地址。 |
 | `ANTIGRAVITY_APP` | 指定官方 Antigravity 路径。 |
+| `CODEX_APP` | 指定 Codex 桌面应用路径，默认 `/Applications/ChatGPT.app`。 |
 | `ANTIGRAVITY_CONFIG_FILE` | 指定配置文件路径。 |
 | `ANTIGRAVITY_NO_PROXY` | 覆盖 `NO_PROXY`。 |
 | `ANTIGRAVITY_NO_AUTO_DETECT=1` | 禁用系统代理自动检测。 |
@@ -163,6 +169,14 @@ socks5h://
 
 输出包含 `IP_ADDRESS`、`IP_LOCATION`、`IP_PROVIDER`、`IP_ASN`、`IP_NETWORK_TYPE` 和 `IP_INFO_SOURCE`。该命令会访问第三方 IP 信息接口；接口不可用时退出码为 `1`。
 
+只检查 Codex API 和 WebSocket，不退出或重启当前 Codex：
+
+```zsh
+"/Applications/Antigravity Proxy.app/Contents/MacOS/AntigravityProxy" --codex-preflight
+```
+
+诊断通过时，`CODEX_WEBSOCKET_STATUS=connected`。最新脱敏报告保存在 `~/Library/Logs/AntigravityProxy/codex-doctor-latest.json`。
+
 ## 工作原理
 
 启动器通过以下方式启动官方应用：
@@ -176,7 +190,9 @@ open --env HTTP_PROXY=... \
      --args --no-proxy-server
 ```
 
-Electron 保持本地直连，`language_server` 继承代理环境变量。启动器刻意不设置 `ALL_PROXY`。
+Electron 保持本地直连，`language_server` 继承代理环境变量。Antigravity 的启动路径刻意不设置 `ALL_PROXY`。
+
+Codex 使用单独的启动策略：HTTP/HTTPS 走系统 HTTP/Mixed 代理，`ALL_PROXY` 优先使用检测到的 `socks5h://` 地址。AP 不写入 `~/.codex/.env` 或 `config.toml`，也不修改全局环境；正常退出后从 Finder、Dock 或 Spotlight 打开 Codex，即恢复系统默认启动方式。
 
 启动前会用 HTTP/1.1 低频检查：
 
@@ -218,6 +234,14 @@ Antigravity 启动后，启动器会在后台监测 `main.log` 和 `language_ser
 
 如果先打开菜单栏程序、再直接打开官方 Antigravity，菜单栏程序会自动接管新启动的未代理实例。如果打开菜单栏程序时 Antigravity 已经在运行，程序会先提示保存内容，确认后只请求正常退出；如果应用没有退出，不会使用信号强制终止，以免丢失未保存内容。
 
+### Codex 一直显示 Reconnecting
+
+- 在 AP 菜单中先选择“检查 Codex WebSocket”。
+- 检查通过后选择“启动 Codex（代理模式）”或“安全重启 Codex 以应用代理”。
+- 如果 Codex 正在运行，AP 会明确提醒重启会中断当前任务；未经确认不会退出。
+- 代理检查失败时，AP 不会操作当前 Codex。
+- 切换代理端口后状态会显示需要重启，但 AP 不会自动重启 Codex。
+
 ### macOS 提示无法验证应用
 
 项目默认没有 Apple 公证。可以在“系统设置”中选择“仍要打开”，右键应用选择“打开”，或者执行：
@@ -249,7 +273,7 @@ xattr -dr com.apple.quarantine "/Applications/Antigravity Proxy.app"
 
 ## 免责声明
 
-本项目与 Google 无隶属关系。Antigravity 和 Google 是 Google LLC 的商标。请自行承担使用风险，并遵守相关软件及代理服务的使用条款。
+本项目与 Google 或 OpenAI 无隶属关系。Antigravity、Google、Codex 和 OpenAI 是其各自权利人的商标。请自行承担使用风险，并遵守相关软件及代理服务的使用条款。
 
 ## 许可证
 

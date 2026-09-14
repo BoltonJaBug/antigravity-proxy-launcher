@@ -3,10 +3,12 @@
 # Electron stays direct/local; only language_server inherits the proxy env.
 set -u
 
-VERSION='1.1.0'
+VERSION='1.3.0'
 ANTIGRAVITY_APP_FROM_ENV="${ANTIGRAVITY_APP:-}"
+CODEX_APP_FROM_ENV="${CODEX_APP:-}"
 NO_PROXY_FROM_ENV="${ANTIGRAVITY_NO_PROXY:-}"
 ANTIGRAVITY_APP="${ANTIGRAVITY_APP:-/Applications/Antigravity.app}"
+CODEX_APP="${CODEX_APP:-/Applications/ChatGPT.app}"
 NO_PROXY_VALUE="${ANTIGRAVITY_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
 CONFIG_FILE="${ANTIGRAVITY_CONFIG_FILE:-$HOME/.config/antigravity-proxy.conf}"
 HEALTH_URL='https://daily-cloudcode-pa.googleapis.com/'
@@ -19,10 +21,14 @@ REGION_CHECK_ENABLED="${ANTIGRAVITY_REGION_CHECK:-1}"
 UNSUPPORTED_REGIONS="${ANTIGRAVITY_UNSUPPORTED_REGIONS:-CN,HK,MO,RU,BY,IR,KP,SY,CU}"
 IP_INFO_URL="${ANTIGRAVITY_IP_INFO_URL:-http://ip-api.com/json/?fields=status,message,query,country,regionName,city,isp,org,as,asname,mobile,proxy,hosting&lang=zh-CN}"
 IP_INFO_TIMEOUT_SECONDS="${ANTIGRAVITY_IP_INFO_TIMEOUT:-6}"
+CODEX_PREFLIGHT_TIMEOUT_SECONDS="${CODEX_PREFLIGHT_TIMEOUT:-45}"
+CODEX_DOCTOR_LOG="${CODEX_DOCTOR_LOG:-$HOME/Library/Logs/AntigravityProxy/codex-doctor-latest.json}"
 
 HTTP_PROXY_URL=''
 HTTPS_PROXY_URL=''
 GRPC_PROXY_URL=''
+SOCKS_PROXY_URL=''
+ALL_PROXY_URL=''
 PROXY_HOST=''
 PROXY_PORT=''
 PROXY_COUNTRY=''
@@ -31,12 +37,14 @@ PRINT_CONFIG=0
 CHECK_REGION=0
 STATUS_MODE=0
 AUTO_RECOVER=0
+CODEX_PREFLIGHT=0
+CODEX_LAUNCH=0
 NONINTERACTIVE=0
 IP_INFO_MODE=0
 
 usage() {
   cat <<'USAGE'
-Usage: AntigravityProxy [--dry-run | --print-config | --check-region | --status | --ip-info | --noninteractive | --auto-recover | --help | --version]
+Usage: AntigravityProxy [--dry-run | --print-config | --check-region | --status | --ip-info | --noninteractive | --auto-recover | --codex-preflight | --codex-launch | --help | --version]
 
 Options:
   --dry-run       Check the selected proxy and print the environment without launching Antigravity.
@@ -46,6 +54,8 @@ Options:
   --ip-info       Print the proxy exit IP, location, provider and network type.
   --noninteractive  Return machine-readable errors without forcing an existing app to quit.
   --auto-recover  Restart Antigravity with the selected proxy when needed.
+  --codex-preflight  Check Codex HTTP and WebSocket connectivity without restarting it.
+  --codex-launch  Safely launch or restart Codex with the selected proxy.
   --help          Show this help.
   --version       Print the launcher version.
 USAGE
@@ -60,6 +70,8 @@ for arg in "$@"; do
     --ip-info) IP_INFO_MODE=1 ;;
     --noninteractive) NONINTERACTIVE=1 ;;
     --auto-recover) AUTO_RECOVER=1; NONINTERACTIVE=1 ;;
+    --codex-preflight) CODEX_PREFLIGHT=1; NONINTERACTIVE=1 ;;
+    --codex-launch) CODEX_LAUNCH=1; NONINTERACTIVE=1 ;;
     --help) usage; exit 0 ;;
     --version) printf '%s\n' "$VERSION"; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; usage >&2; exit 2 ;;
@@ -145,6 +157,18 @@ normalize_proxy_url() {
   printf '%s\n' "$url"
 }
 
+normalize_socks_proxy_url() {
+  local url="$1"
+  [[ "$url" == *'://'* ]] || url="socks5h://${url}"
+  printf '%s\n' "$url"
+}
+
+proxy_url_for_host_port() {
+  local scheme="$1" host="$2" port="$3"
+  [[ "$host" == *:* && "$host" != \[*\] ]] && host="[${host}]"
+  printf '%s://%s:%s\n' "$scheme" "$host" "$port"
+}
+
 parse_proxy_url() {
   local url="$1" scheme authority host port rest
   scheme="${url%%://*}"
@@ -179,7 +203,9 @@ parse_proxy_url() {
 
 detect_system_proxy() {
   local output http_enabled http_host http_port https_enabled https_host https_port
-  output=$(/usr/sbin/scutil --proxy 2>/dev/null) || return 0
+  local socks_enabled socks_host socks_port
+  local scutil_bin="${ANTIGRAVITY_SCUTIL_BIN:-/usr/sbin/scutil}"
+  output=$("$scutil_bin" --proxy 2>/dev/null) || return 0
 
   http_enabled=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPEnable[[:space:]]*:/ {print $3; exit}')
   http_host=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPProxy[[:space:]]*:/ {print $3; exit}')
@@ -187,18 +213,26 @@ detect_system_proxy() {
   https_enabled=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPSEnable[[:space:]]*:/ {print $3; exit}')
   https_host=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPSProxy[[:space:]]*:/ {print $3; exit}')
   https_port=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*HTTPSPort[[:space:]]*:/ {print $3; exit}')
+  socks_enabled=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*SOCKSEnable[[:space:]]*:/ {print $3; exit}')
+  socks_host=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*SOCKSProxy[[:space:]]*:/ {print $3; exit}')
+  socks_port=$(printf '%s\n' "$output" | /usr/bin/awk '/^[[:space:]]*SOCKSPort[[:space:]]*:/ {print $3; exit}')
 
-  if [[ "$https_enabled" == '1' && -n "$https_host" && -n "$https_port" && "$https_port" != '0' ]]; then
-    HTTPS_PROXY_URL="http://${https_host}:${https_port}"
+  if [[ -z "$HTTPS_PROXY_URL" && "$https_enabled" == '1' && -n "$https_host" && -n "$https_port" && "$https_port" != '0' ]]; then
+    HTTPS_PROXY_URL="$(proxy_url_for_host_port http "$https_host" "$https_port")"
   fi
-  if [[ "$http_enabled" == '1' && -n "$http_host" && -n "$http_port" && "$http_port" != '0' ]]; then
-    HTTP_PROXY_URL="http://${http_host}:${http_port}"
+  if [[ -z "$HTTP_PROXY_URL" && "$http_enabled" == '1' && -n "$http_host" && -n "$http_port" && "$http_port" != '0' ]]; then
+    HTTP_PROXY_URL="$(proxy_url_for_host_port http "$http_host" "$http_port")"
+  fi
+  if [[ -z "$SOCKS_PROXY_URL" && "$socks_enabled" == '1' && -n "$socks_host" && -n "$socks_port" && "$socks_port" != '0' ]]; then
+    SOCKS_PROXY_URL="$(proxy_url_for_host_port socks5h "$socks_host" "$socks_port")"
   fi
 }
 
 configure_proxy() {
   local override="${ANTIGRAVITY_PROXY_URL:-}"
+  local socks_override="${ANTIGRAVITY_SOCKS_PROXY_URL:-}"
   local app_override=''
+  local codex_app_override=''
   local no_proxy_override=''
   local no_auto_detect="${ANTIGRAVITY_NO_AUTO_DETECT:-0}"
   local configured_region_url=''
@@ -211,7 +245,9 @@ configure_proxy() {
 
   if [[ -r "$CONFIG_FILE" ]]; then
     [[ -n "$override" ]] || override="$(config_value ANTIGRAVITY_PROXY_URL)"
+    [[ -n "$socks_override" ]] || socks_override="$(config_value ANTIGRAVITY_SOCKS_PROXY_URL)"
     app_override="$(config_value ANTIGRAVITY_APP)"
+    codex_app_override="$(config_value CODEX_APP)"
     no_proxy_override="$(config_value ANTIGRAVITY_NO_PROXY)"
     configured_region_url="$(config_value ANTIGRAVITY_REGION_CHECK_URL)"
     configured_region_timeout="$(config_value ANTIGRAVITY_REGION_CHECK_TIMEOUT)"
@@ -226,6 +262,7 @@ configure_proxy() {
   fi
 
   [[ -n "$app_override" && -z "$ANTIGRAVITY_APP_FROM_ENV" ]] && ANTIGRAVITY_APP="$app_override"
+  [[ -n "$codex_app_override" && -z "$CODEX_APP_FROM_ENV" ]] && CODEX_APP="$codex_app_override"
   [[ -n "$no_proxy_override" && -z "$NO_PROXY_FROM_ENV" ]] && NO_PROXY_VALUE="$no_proxy_override"
   [[ -n "$configured_region_url" && -z "${ANTIGRAVITY_REGION_CHECK_URL:-}" ]] && REGION_CHECK_URL="$configured_region_url"
   [[ -n "$configured_region_timeout" && -z "${ANTIGRAVITY_REGION_CHECK_TIMEOUT:-}" ]] && REGION_CHECK_TIMEOUT_SECONDS="$configured_region_timeout"
@@ -241,13 +278,19 @@ configure_proxy() {
   (( STARTUP_CHECK_SECONDS >= 5 )) || STARTUP_CHECK_SECONDS=35
   [[ "$IP_INFO_TIMEOUT_SECONDS" == <-> ]] || IP_INFO_TIMEOUT_SECONDS=6
   (( IP_INFO_TIMEOUT_SECONDS >= 1 )) || IP_INFO_TIMEOUT_SECONDS=6
+  [[ "$CODEX_PREFLIGHT_TIMEOUT_SECONDS" == <-> ]] || CODEX_PREFLIGHT_TIMEOUT_SECONDS=45
+  (( CODEX_PREFLIGHT_TIMEOUT_SECONDS >= 10 )) || CODEX_PREFLIGHT_TIMEOUT_SECONDS=45
 
   if [[ -n "$override" ]]; then
     override="$(normalize_proxy_url "$override")"
     HTTP_PROXY_URL="$override"
     HTTPS_PROXY_URL="$override"
     GRPC_PROXY_URL="$override"
-  elif [[ "$no_auto_detect" != '1' ]]; then
+  fi
+  if [[ -n "$socks_override" ]]; then
+    SOCKS_PROXY_URL="$(normalize_socks_proxy_url "$socks_override")"
+  fi
+  if [[ "$no_auto_detect" != '1' ]]; then
     detect_system_proxy
   fi
 
@@ -261,12 +304,29 @@ configure_proxy() {
   HTTPS_PROXY_URL="$(normalize_proxy_url "$HTTPS_PROXY_URL")"
   [[ -n "$GRPC_PROXY_URL" ]] || GRPC_PROXY_URL="$HTTPS_PROXY_URL"
   GRPC_PROXY_URL="$(normalize_proxy_url "$GRPC_PROXY_URL")"
+  if [[ -n "$SOCKS_PROXY_URL" ]]; then
+    SOCKS_PROXY_URL="$(normalize_socks_proxy_url "$SOCKS_PROXY_URL")"
+    parse_proxy_url "$SOCKS_PROXY_URL" || return 1
+    ALL_PROXY_URL="$SOCKS_PROXY_URL"
+  else
+    ALL_PROXY_URL="$HTTPS_PROXY_URL"
+  fi
 
   parse_proxy_url "$HTTPS_PROXY_URL"
 }
 
 proxy_ready() {
   /usr/bin/nc -z -G 1 "$PROXY_HOST" "$PROXY_PORT" >/dev/null 2>&1
+}
+
+proxy_url_ready() {
+  local url="$1" saved_host="$PROXY_HOST" saved_port="$PROXY_PORT" result=1
+  if parse_proxy_url "$url" && proxy_ready; then
+    result=0
+  fi
+  PROXY_HOST="$saved_host"
+  PROXY_PORT="$saved_port"
+  return $result
 }
 
 proxy_healthy_once() {
@@ -545,6 +605,197 @@ main_has_proxy_env() {
     && printf '%s\n' "$env" | /usr/bin/grep -qx "HTTPS_PROXY=${HTTPS_PROXY_URL}"
 }
 
+codex_executable() {
+  local executable_name
+  executable_name=$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "${CODEX_APP%/}/Contents/Info.plist" 2>/dev/null) || executable_name='ChatGPT'
+  printf '%s/Contents/MacOS/%s\n' "${CODEX_APP%/}" "$executable_name"
+}
+
+codex_binary() {
+  if [[ -n "${CODEX_DOCTOR_BIN:-}" ]]; then
+    printf '%s\n' "$CODEX_DOCTOR_BIN"
+  else
+    printf '%s/Contents/Resources/codex\n' "${CODEX_APP%/}"
+  fi
+}
+
+codex_pid() {
+  local executable pgrep_bin="${ANTIGRAVITY_PGREP_BIN:-/usr/bin/pgrep}"
+  executable="$(codex_executable)"
+  # macOS pgrep excludes its own ancestors unless -a is used. That matters
+  # when AP diagnostics are invoked from a terminal hosted by Codex itself.
+  "$pgrep_bin" -a -f "^${executable}( |$)" 2>/dev/null | /usr/bin/head -n 1
+}
+
+codex_has_proxy_env() {
+  local pid="$1" env ps_bin="${ANTIGRAVITY_PS_BIN:-/bin/ps}"
+  env=$("$ps_bin" eww -p "$pid" 2>/dev/null | /usr/bin/tr ' ' '\n')
+  printf '%s\n' "$env" | /usr/bin/grep -qx "HTTP_PROXY=${HTTP_PROXY_URL}" \
+    && printf '%s\n' "$env" | /usr/bin/grep -qx "HTTPS_PROXY=${HTTPS_PROXY_URL}" \
+    && printf '%s\n' "$env" | /usr/bin/grep -qx "ALL_PROXY=${ALL_PROXY_URL}" \
+    && printf '%s\n' "$env" | /usr/bin/grep -qx "NO_PROXY=${NO_PROXY_VALUE}"
+}
+
+codex_doctor_value() {
+  local json_file="$1" key_path="$2"
+  /usr/bin/plutil -extract "$key_path" raw -o - "$json_file" 2>/dev/null || true
+}
+
+parse_codex_doctor() {
+  local json_file="$1" provider_status inference_detail websocket_status handshake_detail cdn_detail
+
+  CODEX_PREFLIGHT_STATUS='error'
+  CODEX_HTTP_STATUS='unknown'
+  CODEX_WEBSOCKET_STATUS='unknown'
+  CODEX_PREFLIGHT_MESSAGE='Codex doctor 返回了无法识别的诊断结果。'
+
+  /usr/bin/plutil -extract schemaVersion raw -o - "$json_file" >/dev/null 2>&1 || return 1
+  provider_status="$(codex_doctor_value "$json_file" 'checks.network\.provider_reachability.status')"
+  inference_detail="$(codex_doctor_value "$json_file" 'checks.network\.provider_reachability.details.ChatGPT inference URL')"
+  websocket_status="$(codex_doctor_value "$json_file" 'checks.network\.websocket_reachability.status')"
+  handshake_detail="$(codex_doctor_value "$json_file" 'checks.network\.websocket_reachability.details.handshake result')"
+  cdn_detail="$(codex_doctor_value "$json_file" 'checks.network\.provider_reachability.details.desktop assets CDN')"
+
+  if [[ "$inference_detail" == *'reachable (HTTP '* ]]; then
+    CODEX_HTTP_STATUS='reachable'
+  elif [[ -n "$inference_detail" ]]; then
+    CODEX_HTTP_STATUS='failed'
+  fi
+
+  if [[ "$websocket_status" == 'ok' && "$handshake_detail" == *'HTTP 101'* ]]; then
+    CODEX_WEBSOCKET_STATUS='connected'
+  elif [[ "$handshake_detail" == *'timed out'* ]]; then
+    CODEX_WEBSOCKET_STATUS='timeout'
+  elif [[ -n "$websocket_status" || -n "$handshake_detail" ]]; then
+    CODEX_WEBSOCKET_STATUS='failed'
+  fi
+
+  if [[ "$CODEX_HTTP_STATUS" == 'reachable' && "$CODEX_WEBSOCKET_STATUS" == 'connected' ]]; then
+    if [[ "$provider_status" == 'warning' || "$cdn_detail" == *'timed out'* ]]; then
+      CODEX_PREFLIGHT_STATUS='warning'
+      CODEX_PREFLIGHT_MESSAGE='Codex API 与 WebSocket 均可连接；可选桌面资源 CDN 暂时不可达。'
+    else
+      CODEX_PREFLIGHT_STATUS='success'
+      CODEX_PREFLIGHT_MESSAGE='Codex API 与 WebSocket 代理检查通过。'
+    fi
+    return 0
+  fi
+
+  if [[ "$CODEX_WEBSOCKET_STATUS" == 'timeout' ]]; then
+    CODEX_PREFLIGHT_MESSAGE='Codex API 可达，但 WebSocket 握手超时；未对当前 Codex 执行任何操作。'
+  elif [[ "$CODEX_HTTP_STATUS" == 'failed' ]]; then
+    CODEX_PREFLIGHT_MESSAGE='Codex API 无法通过当前代理访问；未对当前 Codex 执行任何操作。'
+  else
+    CODEX_PREFLIGHT_MESSAGE='Codex HTTP/WebSocket 代理检查未通过；未对当前 Codex 执行任何操作。'
+  fi
+  return 1
+}
+
+print_codex_preflight() {
+  printf 'CODEX_PREFLIGHT_STATUS=%s\n' "$CODEX_PREFLIGHT_STATUS"
+  printf 'CODEX_HTTP_STATUS=%s\n' "$CODEX_HTTP_STATUS"
+  printf 'CODEX_WEBSOCKET_STATUS=%s\n' "$CODEX_WEBSOCKET_STATUS"
+  printf 'CODEX_PREFLIGHT_MESSAGE=%s\n' "$CODEX_PREFLIGHT_MESSAGE"
+  printf 'CODEX_DOCTOR_LOG=%s\n' "$CODEX_DOCTOR_LOG"
+}
+
+run_codex_doctor() {
+  local binary temp_dir output_file error_file doctor_pid started_at timed_out=0
+  binary="$(codex_binary)"
+
+  if [[ ! -x "$binary" ]]; then
+    CODEX_PREFLIGHT_STATUS='error'
+    CODEX_HTTP_STATUS='unknown'
+    CODEX_WEBSOCKET_STATUS='unknown'
+    CODEX_PREFLIGHT_MESSAGE="未找到 Codex 网络诊断程序：${binary}"
+    return 1
+  fi
+
+  temp_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/antigravity-proxy-codex.XXXXXX") || return 1
+  output_file="$temp_dir/doctor.json"
+  error_file="$temp_dir/doctor.stderr"
+
+  env \
+    HTTP_PROXY="$HTTP_PROXY_URL" \
+    HTTPS_PROXY="$HTTPS_PROXY_URL" \
+    ALL_PROXY="$ALL_PROXY_URL" \
+    NO_PROXY="$NO_PROXY_VALUE" \
+    http_proxy="$HTTP_PROXY_URL" \
+    https_proxy="$HTTPS_PROXY_URL" \
+    all_proxy="$ALL_PROXY_URL" \
+    no_proxy="$NO_PROXY_VALUE" \
+    "$binary" doctor --json >"$output_file" 2>"$error_file" &
+  doctor_pid=$!
+  started_at=$SECONDS
+
+  while /bin/kill -0 "$doctor_pid" 2>/dev/null; do
+    if (( SECONDS - started_at >= CODEX_PREFLIGHT_TIMEOUT_SECONDS )); then
+      timed_out=1
+      /bin/kill -TERM "$doctor_pid" 2>/dev/null || true
+      break
+    fi
+    /bin/sleep 1
+  done
+  wait "$doctor_pid" 2>/dev/null || true
+
+  /bin/mkdir -p "${CODEX_DOCTOR_LOG:h}"
+  if [[ -s "$output_file" ]]; then
+    /bin/cp "$output_file" "$CODEX_DOCTOR_LOG"
+    /bin/chmod 600 "$CODEX_DOCTOR_LOG" 2>/dev/null || true
+  fi
+
+  if (( timed_out )); then
+    CODEX_PREFLIGHT_STATUS='error'
+    CODEX_HTTP_STATUS='unknown'
+    CODEX_WEBSOCKET_STATUS='timeout'
+    CODEX_PREFLIGHT_MESSAGE="Codex 网络诊断在 ${CODEX_PREFLIGHT_TIMEOUT_SECONDS} 秒内未完成；未对当前 Codex 执行任何操作。"
+    /bin/rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if [[ ! -s "$output_file" ]]; then
+    CODEX_PREFLIGHT_STATUS='error'
+    CODEX_HTTP_STATUS='unknown'
+    CODEX_WEBSOCKET_STATUS='unknown'
+    CODEX_PREFLIGHT_MESSAGE='Codex 网络诊断没有返回 JSON；未对当前 Codex 执行任何操作。'
+    /bin/rm -rf "$temp_dir"
+    return 1
+  fi
+
+  parse_codex_doctor "$output_file"
+  local parse_status=$?
+  /bin/rm -rf "$temp_dir"
+  return $parse_status
+}
+
+codex_preflight() {
+  CODEX_PREFLIGHT_STATUS='error'
+  CODEX_HTTP_STATUS='unknown'
+  CODEX_WEBSOCKET_STATUS='unknown'
+  CODEX_PREFLIGHT_MESSAGE='Codex 代理检查失败。'
+
+  if [[ ! -d "$CODEX_APP" ]]; then
+    CODEX_PREFLIGHT_MESSAGE="未找到 Codex 客户端：${CODEX_APP}"
+    print_codex_preflight
+    return 1
+  fi
+  if ! proxy_url_ready "$HTTPS_PROXY_URL"; then
+    CODEX_PREFLIGHT_MESSAGE="HTTP 代理端口不可用：${HTTPS_PROXY_URL}"
+    print_codex_preflight
+    return 1
+  fi
+  if [[ "$ALL_PROXY_URL" != "$HTTPS_PROXY_URL" ]] && ! proxy_url_ready "$ALL_PROXY_URL"; then
+    CODEX_PREFLIGHT_MESSAGE="SOCKS 代理端口不可用：${ALL_PROXY_URL}"
+    print_codex_preflight
+    return 1
+  fi
+
+  run_codex_doctor
+  local result=$?
+  print_codex_preflight
+  return $result
+}
+
 main_is_blank() {
   local log="$HOME/Library/Logs/Antigravity/main.log"
   local server_log="$HOME/Library/Logs/Antigravity/language_server.log"
@@ -569,6 +820,7 @@ main_is_blank() {
 
 print_runtime_status() {
   local pid='' has_proxy_env=0 blank=0 ready=0
+  local codex_process='' codex_has_proxy=0 codex_installed=0
 
   pid="$(main_pid)"
   if [[ -n "$pid" ]]; then
@@ -576,6 +828,11 @@ print_runtime_status() {
     main_is_blank && blank=1
   fi
   proxy_ready && ready=1
+  [[ -d "$CODEX_APP" ]] && codex_installed=1
+  codex_process="$(codex_pid)"
+  if [[ -n "$codex_process" ]]; then
+    codex_has_proxy_env "$codex_process" && codex_has_proxy=1
+  fi
 
   printf 'PID=%s\n' "$pid"
   printf 'HAS_PROXY_ENV=%s\n' "$has_proxy_env"
@@ -584,6 +841,11 @@ print_runtime_status() {
   printf 'PROXY_URL=%s\n' "$HTTPS_PROXY_URL"
   printf 'APP_PATH=%s\n' "$ANTIGRAVITY_APP"
   printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
+  printf 'CODEX_INSTALLED=%s\n' "$codex_installed"
+  printf 'CODEX_PID=%s\n' "$codex_process"
+  printf 'CODEX_HAS_PROXY_ENV=%s\n' "$codex_has_proxy"
+  printf 'CODEX_APP_PATH=%s\n' "$CODEX_APP"
+  printf 'ALL_PROXY_URL=%s\n' "$ALL_PROXY_URL"
 }
 
 wait_for_main_exit() {
@@ -595,11 +857,81 @@ wait_for_main_exit() {
   return 1
 }
 
+wait_for_codex_exit() {
+  local attempt
+  for attempt in {1..15}; do
+    [[ -z "$(codex_pid)" ]] && return 0
+    /bin/sleep 1
+  done
+  return 1
+}
+
+launch_codex() {
+  local pid attempt launched_pid
+  local open_bin="${ANTIGRAVITY_OPEN_BIN:-/usr/bin/open}"
+  local osascript_bin="${ANTIGRAVITY_OSASCRIPT_BIN:-/usr/bin/osascript}"
+
+  if [[ ! -d "$CODEX_APP" ]]; then
+    show_error "未找到 Codex 客户端：\n${CODEX_APP}\n\n请先安装 Codex，或在 ${CONFIG_FILE} 中设置 CODEX_APP。"
+    return 1
+  fi
+
+  pid="$(codex_pid)"
+  if [[ -n "$pid" ]] && codex_has_proxy_env "$pid"; then
+    "$open_bin" -a "$CODEX_APP"
+    return 0
+  fi
+
+  # The preflight boundary is deliberately before the quit request. A broken
+  # proxy can therefore never take down the currently usable Codex session.
+  if ! codex_preflight; then
+    show_error "$CODEX_PREFLIGHT_MESSAGE"
+    return 1
+  fi
+
+  if [[ -n "$pid" ]]; then
+    "$osascript_bin" -e 'tell application id "com.openai.codex" to quit' >/dev/null 2>&1 || true
+    if ! wait_for_codex_exit; then
+      show_error "Codex 尚未退出。为保护当前任务，本次没有强制终止应用。请保存工作并手动退出 Codex 后重试。"
+      return 1
+    fi
+  fi
+
+  "$open_bin" \
+    --env "HTTP_PROXY=${HTTP_PROXY_URL}" \
+    --env "HTTPS_PROXY=${HTTPS_PROXY_URL}" \
+    --env "ALL_PROXY=${ALL_PROXY_URL}" \
+    --env "NO_PROXY=${NO_PROXY_VALUE}" \
+    --env "http_proxy=${HTTP_PROXY_URL}" \
+    --env "https_proxy=${HTTPS_PROXY_URL}" \
+    --env "all_proxy=${ALL_PROXY_URL}" \
+    --env "no_proxy=${NO_PROXY_VALUE}" \
+    -a "$CODEX_APP" || {
+      show_error "无法使用代理环境启动 Codex：\n${CODEX_APP}\n\n你可以从 Finder 或 Dock 正常启动 Codex，以恢复系统默认网络环境。"
+      return 1
+    }
+
+  for attempt in {1..20}; do
+    launched_pid="$(codex_pid)"
+    if [[ -n "$launched_pid" ]] && codex_has_proxy_env "$launched_pid"; then
+      notify "Codex 已使用当前代理启动。"
+      return 0
+    fi
+    /bin/sleep 1
+  done
+
+  show_error "Codex 已启动，但未能确认代理环境生效。请正常退出 Codex，再从 Finder 或 Dock 打开以恢复系统默认网络环境。"
+  return 1
+}
+
 print_config() {
   printf 'ANTIGRAVITY_APP=%s\n' "$ANTIGRAVITY_APP"
+  printf 'CODEX_APP=%s\n' "$CODEX_APP"
   printf 'HTTP_PROXY=%s\n' "$HTTP_PROXY_URL"
   printf 'HTTPS_PROXY=%s\n' "$HTTPS_PROXY_URL"
   printf 'GRPC_PROXY=%s\n' "$GRPC_PROXY_URL"
+  printf 'SOCKS_PROXY=%s\n' "$SOCKS_PROXY_URL"
+  printf 'ALL_PROXY=%s\n' "$ALL_PROXY_URL"
   printf 'NO_PROXY=%s\n' "$NO_PROXY_VALUE"
   printf 'REGION_CHECK=%s\n' "$REGION_CHECK_ENABLED"
   printf 'REGION_CHECK_URL=%s\n' "$REGION_CHECK_URL"
@@ -646,6 +978,16 @@ if (( IP_INFO_MODE )); then
   fi
   print_ip_info
   exit 1
+fi
+
+if (( CODEX_PREFLIGHT )); then
+  codex_preflight
+  exit $?
+fi
+
+if (( CODEX_LAUNCH )); then
+  launch_codex
+  exit $?
 fi
 
 if ! proxy_ready; then

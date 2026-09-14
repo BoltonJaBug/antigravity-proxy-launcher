@@ -19,19 +19,52 @@ OUTPUT_DIR="$TEST_OUTPUT" "$ROOT_DIR/scripts/build-app.sh"
 [[ "$(/usr/bin/plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" == 'true' ]]
 [[ "$(/usr/bin/plutil -extract LSMultipleInstancesProhibited raw -o - "$APP/Contents/Info.plist")" == 'true' ]]
 
-"$LAUNCHER" --version | /usr/bin/grep -qx '1.1.0'
+"$LAUNCHER" --version | /usr/bin/grep -qx '1.3.0'
 
 TEST_CONFIG="$TEST_OUTPUT/nonexistent.conf"
-config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890' "$LAUNCHER" --print-config)
+config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" \
+  ANTIGRAVITY_PROXY_URL='http://127.0.0.1:7890' \
+  ANTIGRAVITY_NO_AUTO_DETECT=1 \
+  "$LAUNCHER" --print-config)
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'HTTP_PROXY=http://127.0.0.1:7890'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'HTTPS_PROXY=http://127.0.0.1:7890'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'GRPC_PROXY=http://127.0.0.1:7890'
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'ALL_PROXY=http://127.0.0.1:7890'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'REGION_CHECK=1'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'UNSUPPORTED_REGIONS=CN,HK,MO,RU,BY,IR,KP,SY,CU'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'REGION_CHECK_TIMEOUT=8'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'STARTUP_CHECK_SECONDS=35'
 printf '%s\n' "$config_output" | /usr/bin/grep -q '^IP_INFO_URL=http://ip-api.com/'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'IP_INFO_TIMEOUT=6'
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'CODEX_APP=/Applications/ChatGPT.app'
+
+# System proxy detection keeps the HTTP/Mixed endpoint for HTTPS and uses the
+# SOCKS endpoint for ALL_PROXY so Codex WebSocket DNS also traverses the proxy.
+FAKE_SCUTIL="$TEST_OUTPUT/fake-scutil"
+cat > "$FAKE_SCUTIL" <<'SCRIPT'
+#!/bin/zsh
+cat <<'OUTPUT'
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 8899
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 8899
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 9900
+  SOCKSProxy : 127.0.0.1
+}
+OUTPUT
+SCRIPT
+chmod +x "$FAKE_SCUTIL"
+config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" \
+  ANTIGRAVITY_SCUTIL_BIN="$FAKE_SCUTIL" \
+  ANTIGRAVITY_PROXY_URL= \
+  "$LAUNCHER" --print-config)
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'HTTP_PROXY=http://127.0.0.1:8899'
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'SOCKS_PROXY=socks5h://127.0.0.1:9900'
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'ALL_PROXY=socks5h://127.0.0.1:9900'
 
 # No conventional port is assumed when system-proxy detection is disabled.
 set +e
@@ -53,9 +86,11 @@ ANTIGRAVITY_REGION_CHECK_TIMEOUT='5'
 ANTIGRAVITY_STARTUP_CHECK_SECONDS='12'
 ANTIGRAVITY_IP_INFO_URL='http://127.0.0.1:9999/ip-info'
 ANTIGRAVITY_IP_INFO_TIMEOUT='3'
+ANTIGRAVITY_SOCKS_PROXY_URL='socks5h://127.0.0.1:9901'
+CODEX_APP='/Applications/Custom Codex.app'
 CONFIG
 
-config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" "$LAUNCHER" --print-config)
+config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" ANTIGRAVITY_NO_AUTO_DETECT=1 "$LAUNCHER" --print-config)
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'HTTP_PROXY=http://127.0.0.1:8899'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'REGION_CHECK=0'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'UNSUPPORTED_REGIONS=CN, HK, US'
@@ -63,9 +98,103 @@ printf '%s\n' "$config_output" | /usr/bin/grep -qx 'REGION_CHECK_TIMEOUT=5'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'STARTUP_CHECK_SECONDS=12'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'IP_INFO_URL=http://127.0.0.1:9999/ip-info'
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'IP_INFO_TIMEOUT=3'
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'SOCKS_PROXY=socks5h://127.0.0.1:9901'
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'ALL_PROXY=socks5h://127.0.0.1:9901'
+printf '%s\n' "$config_output" | /usr/bin/grep -qx 'CODEX_APP=/Applications/Custom Codex.app'
 
 config_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_CONFIG" ANTIGRAVITY_REGION_CHECK='1' "$LAUNCHER" --print-config)
 printf '%s\n' "$config_output" | /usr/bin/grep -qx 'REGION_CHECK=1'
+
+# Codex doctor parsing ignores unrelated overall failures and evaluates only
+# provider reachability and the Responses WebSocket handshake.
+eval "$(/usr/bin/awk '
+  /^codex_doctor_value\(\)/ { capture=1 }
+  /^run_codex_doctor\(\)/ { capture=0 }
+  capture { print }
+' "$ROOT_DIR/src/AntigravityProxy")"
+
+parse_codex_doctor "$ROOT_DIR/tests/fixtures/codex-doctor/success.json"
+[[ "$CODEX_PREFLIGHT_STATUS" == 'success' ]]
+[[ "$CODEX_HTTP_STATUS" == 'reachable' ]]
+[[ "$CODEX_WEBSOCKET_STATUS" == 'connected' ]]
+
+parse_codex_doctor "$ROOT_DIR/tests/fixtures/codex-doctor/warning.json"
+[[ "$CODEX_PREFLIGHT_STATUS" == 'warning' ]]
+[[ "$CODEX_HTTP_STATUS" == 'reachable' ]]
+[[ "$CODEX_WEBSOCKET_STATUS" == 'connected' ]]
+
+set +e
+parse_codex_doctor "$ROOT_DIR/tests/fixtures/codex-doctor/websocket-timeout.json"
+doctor_status=$?
+set -e
+[[ $doctor_status -eq 1 ]]
+[[ "$CODEX_PREFLIGHT_STATUS" == 'error' ]]
+[[ "$CODEX_HTTP_STATUS" == 'reachable' ]]
+[[ "$CODEX_WEBSOCKET_STATUS" == 'timeout' ]]
+
+set +e
+parse_codex_doctor "$ROOT_DIR/tests/fixtures/codex-doctor/missing.json"
+doctor_status=$?
+set -e
+[[ $doctor_status -eq 1 ]]
+[[ "$CODEX_HTTP_STATUS" == 'unknown' ]]
+[[ "$CODEX_WEBSOCKET_STATUS" == 'unknown' ]]
+
+# Codex is managed only when every required process-scoped proxy value matches.
+eval "$(/usr/bin/awk '
+  /^codex_has_proxy_env\(\)/ { capture=1 }
+  /^codex_doctor_value\(\)/ { capture=0 }
+  capture { print }
+' "$ROOT_DIR/src/AntigravityProxy")"
+HTTP_PROXY_URL='http://127.0.0.1:8899'
+HTTPS_PROXY_URL='http://127.0.0.1:8899'
+ALL_PROXY_URL='socks5h://127.0.0.1:9901'
+NO_PROXY_VALUE='localhost,127.0.0.1,::1,.local'
+FAKE_PS="$TEST_OUTPUT/fake-ps"
+cat > "$FAKE_PS" <<'SCRIPT'
+#!/bin/zsh
+printf '%s\n' 'command HTTP_PROXY=http://127.0.0.1:8899 HTTPS_PROXY=http://127.0.0.1:8899 ALL_PROXY=socks5h://127.0.0.1:9901 NO_PROXY=localhost,127.0.0.1,::1,.local'
+SCRIPT
+chmod +x "$FAKE_PS"
+ANTIGRAVITY_PS_BIN="$FAKE_PS" codex_has_proxy_env 4242
+cat > "$FAKE_PS" <<'SCRIPT'
+#!/bin/zsh
+printf '%s\n' 'command HTTP_PROXY=http://127.0.0.1:8899 HTTPS_PROXY=http://127.0.0.1:8899 ALL_PROXY=socks5h://127.0.0.1:9999 NO_PROXY=localhost,127.0.0.1,::1,.local'
+SCRIPT
+set +e
+ANTIGRAVITY_PS_BIN="$FAKE_PS" codex_has_proxy_env 4242
+proxy_env_status=$?
+set -e
+[[ $proxy_env_status -eq 1 ]]
+
+# A failed preflight must return before any quit or open command is attempted.
+eval "$(/usr/bin/awk '
+  /^launch_codex\(\)/ { capture=1 }
+  /^print_config\(\)/ { capture=0 }
+  capture { print }
+' "$ROOT_DIR/src/AntigravityProxy")"
+CODEX_APP="$TEST_OUTPUT/fake-codex.app"
+mkdir -p "$CODEX_APP"
+CODEX_PREFLIGHT_MESSAGE='fixture failure'
+codex_pid() { printf '4242\n'; }
+codex_has_proxy_env() { return 1; }
+codex_preflight() { return 1; }
+show_error() { return 1; }
+fake_action_log="$TEST_OUTPUT/codex-action.log"
+FAKE_CODEX_COMMAND="$TEST_OUTPUT/fake-codex-command"
+cat > "$FAKE_CODEX_COMMAND" <<SCRIPT
+#!/bin/zsh
+printf 'called\n' >> '$fake_action_log'
+SCRIPT
+chmod +x "$FAKE_CODEX_COMMAND"
+set +e
+ANTIGRAVITY_OPEN_BIN="$FAKE_CODEX_COMMAND" \
+  ANTIGRAVITY_OSASCRIPT_BIN="$FAKE_CODEX_COMMAND" \
+  launch_codex
+launch_status=$?
+set -e
+[[ $launch_status -eq 1 ]]
+[[ ! -e "$fake_action_log" ]]
 
 # IP information parsing is independent from the live API so menus and CI can
 # be validated without making a network request.

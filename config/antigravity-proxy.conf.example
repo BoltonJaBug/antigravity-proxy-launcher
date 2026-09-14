@@ -5,8 +5,16 @@
 # only an example and is not a project default.
 # ANTIGRAVITY_PROXY_URL='http://127.0.0.1:33210'
 
+# Optional SOCKS override used by Codex ALL_PROXY/WebSocket traffic. When the
+# proxy client exposes a macOS SOCKS proxy, AP detects this automatically.
+# ANTIGRAVITY_SOCKS_PROXY_URL='socks5h://127.0.0.1:33210'
+
 # Optional: path to the official Antigravity application.
 # ANTIGRAVITY_APP='/Applications/Antigravity.app'
+
+# Optional: path to the Codex desktop application. Some releases keep the
+# historical ChatGPT.app name while using the com.openai.codex bundle ID.
+# CODEX_APP='/Applications/ChatGPT.app'
 
 # Optional: hosts that must bypass the proxy.
 # ANTIGRAVITY_NO_PROXY='localhost,127.0.0.1,::1,.local'

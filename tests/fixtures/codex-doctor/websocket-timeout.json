@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "overallStatus": "warning",
+  "checks": {
+    "network.provider_reachability": {
+      "status": "ok",
+      "details": {
+        "ChatGPT inference URL": "https://chatgpt.com/backend-api/<redacted> reachable (HTTP 405)",
+        "desktop assets CDN": "reachable"
+      }
+    },
+    "network.websocket_reachability": {
+      "status": "warning",
+      "details": {
+        "handshake result": "connection timed out"
+      }
+    }
+  }
+}

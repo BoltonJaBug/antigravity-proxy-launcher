@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "overallStatus": "fail",
+  "checks": {
+    "network.provider_reachability": {
+      "status": "warning",
+      "details": {
+        "ChatGPT inference URL": "https://chatgpt.com/backend-api/<redacted> reachable (HTTP 405)",
+        "desktop assets CDN": "request timed out (optional)"
+      }
+    },
+    "network.websocket_reachability": {
+      "status": "ok",
+      "details": {
+        "handshake result": "HTTP 101 Switching Protocols"
+      }
+    }
+  }
+}

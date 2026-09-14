@@ -10,6 +10,11 @@ private struct RuntimeStatus {
     let proxyURL: String
     let appPath: String
     let configFile: String
+    let codexInstalled: Bool
+    let codexPID: String
+    let codexHasProxyEnvironment: Bool
+    let codexAppPath: String
+    let allProxyURL: String
 
     init?(output: String) {
         var values: [String: String] = [:]
@@ -32,6 +37,36 @@ private struct RuntimeStatus {
         self.proxyURL = values["PROXY_URL"] ?? ""
         self.appPath = values["APP_PATH"] ?? ""
         self.configFile = values["CONFIG_FILE"] ?? ""
+        self.codexInstalled = values["CODEX_INSTALLED"] == "1"
+        self.codexPID = values["CODEX_PID"] ?? ""
+        self.codexHasProxyEnvironment = values["CODEX_HAS_PROXY_ENV"] == "1"
+        self.codexAppPath = values["CODEX_APP_PATH"] ?? ""
+        self.allProxyURL = values["ALL_PROXY_URL"] ?? ""
+    }
+}
+
+private enum CodexState {
+    case checking
+    case notInstalled
+    case stopped(proxyReady: Bool)
+    case managed
+    case restartRequired
+    case preflighting
+    case launching
+    case failed(String)
+
+    var menuTitle: String {
+        switch self {
+        case .checking: return "正在检查 Codex 状态…"
+        case .notInstalled: return "Codex 未安装"
+        case .stopped(let ready):
+            return ready ? "Codex 未运行，代理端口正常" : "Codex 未运行，代理端口不可用"
+        case .managed: return "Codex 已使用代理"
+        case .restartRequired: return "Codex 需要安全重启以应用代理"
+        case .preflighting: return "正在检查 Codex WebSocket…"
+        case .launching: return "正在安全启动 / 重启 Codex…"
+        case .failed(let message): return "Codex 代理失败：\(message)"
+        }
     }
 }
 
@@ -173,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let logger = FileLogger()
     private var statusItem: NSStatusItem!
     private var statusMenuItem: NSMenuItem!
+    private var codexStatusMenuItem: NSMenuItem!
     private var proxyMenuItem: NSMenuItem!
     private var ipInfoMenuItem: NSMenuItem!
     private var ipAddressMenuItem: NSMenuItem!
@@ -185,6 +221,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var ipRefreshMenuItem: NSMenuItem!
     private var failureDetailMenuItem: NSMenuItem!
     private var primaryMenuItem: NSMenuItem!
+    private var codexMenuItem: NSMenuItem!
+    private var codexCheckMenuItem: NSMenuItem!
     private var loginMenuItem: NSMenuItem!
     private var refreshTimer: Timer?
     private var workspaceObservers: [NSObjectProtocol] = []
@@ -198,7 +236,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusProcess: Process?
     private var ipInfoProcess: Process?
     private var operationProcess: Process?
+    private var codexOperationProcess: Process?
     private var state: ServiceState = .checking
+    private var codexState: CodexState = .checking
     private var lastProxyURL = "正在检测…"
     private var lastConfigFile = ""
     private var lastStatusError: String?
@@ -213,6 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var promptedExistingPID: String?
     private var autoRecoverySuppressed = false
     private var lastFailureDetail: String?
+    private var lastCodexPID = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -233,6 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusProcess?.terminate()
         ipInfoProcess?.terminate()
         operationProcess?.terminate()
+        codexOperationProcess?.terminate()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -270,9 +312,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handleWorkspaceNotification(_ notification: Notification, launched: Bool) {
         guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              application.bundleIdentifier == "com.google.antigravity" else {
+              let bundleIdentifier = application.bundleIdentifier else {
             return
         }
+
+        if bundleIdentifier == "com.openai.codex" {
+            logger.write("Codex \(launched ? "launch" : "exit") detected; status refresh only")
+            codexState = .checking
+            updateInterface()
+            scheduleRefresh(after: launched ? 1.5 : 0.5)
+            return
+        }
+        guard bundleIdentifier == "com.google.antigravity" else { return }
 
         logger.write("Antigravity \(launched ? "launch" : "exit") detected")
         if launched {
@@ -337,6 +388,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
 
+        codexStatusMenuItem = NSMenuItem(title: "正在检查 Codex…", action: nil, keyEquivalent: "")
+        codexStatusMenuItem.isEnabled = false
+        menu.addItem(codexStatusMenuItem)
+
         proxyMenuItem = NSMenuItem(title: "代理: 正在检测…", action: nil, keyEquivalent: "")
         proxyMenuItem.isEnabled = false
         menu.addItem(proxyMenuItem)
@@ -381,6 +436,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         primaryMenuItem.target = self
         menu.addItem(primaryMenuItem)
 
+        codexMenuItem = NSMenuItem(title: "启动 Codex（代理模式）", action: #selector(codexAction(_:)), keyEquivalent: "")
+        codexMenuItem.target = self
+        menu.addItem(codexMenuItem)
+
+        codexCheckMenuItem = NSMenuItem(title: "检查 Codex WebSocket", action: #selector(checkCodex(_:)), keyEquivalent: "")
+        codexCheckMenuItem.target = self
+        menu.addItem(codexCheckMenuItem)
+
         let checkItem = NSMenuItem(title: "检查代理和 Google 连通性", action: #selector(checkProxy(_:)), keyEquivalent: "")
         checkItem.target = self
         menu.addItem(checkItem)
@@ -418,6 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateInterface() {
         statusItem.button?.toolTip = state.menuTitle
         statusMenuItem.title = state.menuTitle
+        codexStatusMenuItem.title = codexState.menuTitle
         proxyMenuItem.title = "代理: \(lastProxyURL)"
         updateIPInfoInterface()
         failureDetailMenuItem.isHidden = lastFailureDetail == nil
@@ -430,7 +494,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             primaryMenuItem.title = "启动 / 重启 Antigravity"
         }
-        primaryMenuItem.isEnabled = engineURL != nil
+        primaryMenuItem.isEnabled = engineURL != nil && codexOperationProcess == nil
+        if codexOperationProcess != nil {
+            codexMenuItem.title = "Codex 操作进行中…"
+        } else if case .restartRequired = codexState {
+            codexMenuItem.title = "安全重启 Codex 以应用代理"
+        } else if case .managed = codexState {
+            codexMenuItem.title = "打开 Codex"
+        } else {
+            codexMenuItem.title = "启动 Codex（代理模式）"
+        }
+        if case .notInstalled = codexState {
+            codexMenuItem.isEnabled = false
+            codexCheckMenuItem.isEnabled = false
+        } else {
+            let otherOperationRunning = operationProcess != nil
+            codexMenuItem.isEnabled = engineURL != nil && codexOperationProcess == nil && !otherOperationRunning
+            codexCheckMenuItem.isEnabled = engineURL != nil && codexOperationProcess == nil && !otherOperationRunning
+        }
     }
 
     private func updateIPInfoInterface() {
@@ -504,7 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshStatus() {
-        guard operationProcess == nil, statusProcess == nil else { return }
+        guard operationProcess == nil, codexOperationProcess == nil, statusProcess == nil else { return }
         guard let engineURL else {
             state = .error("代理脚本缺失")
             updateInterface()
@@ -602,6 +683,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastProxyURL = status.proxyURL
         lastProxyReady = status.proxyIsReady
         lastConfigFile = status.configFile
+        handleCodexStatus(status)
 
         if proxyChanged {
             lastIPInfo = nil
@@ -684,6 +766,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func handleCodexStatus(_ status: RuntimeStatus) {
+        lastCodexPID = status.codexPID
+        guard status.codexInstalled else {
+            codexState = .notInstalled
+            return
+        }
+        guard !status.codexPID.isEmpty else {
+            codexState = .stopped(proxyReady: status.proxyIsReady)
+            return
+        }
+        codexState = status.codexHasProxyEnvironment ? .managed : .restartRequired
+    }
+
     @objc private func primaryAction(_ sender: Any?) {
         if operationProcess != nil {
             stopCurrentOperation()
@@ -697,8 +792,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         beginOperation(arguments: ["--noninteractive"], automatic: false)
     }
 
+    @objc private func codexAction(_ sender: Any?) {
+        guard codexOperationProcess == nil else { return }
+        if !lastCodexPID.isEmpty,
+           case .restartRequired = codexState,
+           !confirmSafeCodexRestart() {
+            return
+        }
+        logger.write("Starting manual Codex proxy launch")
+        beginCodexOperation(arguments: ["--codex-launch"], isPreflight: false)
+    }
+
+    @objc private func checkCodex(_ sender: Any?) {
+        guard codexOperationProcess == nil else { return }
+        logger.write("Starting manual Codex WebSocket preflight")
+        beginCodexOperation(arguments: ["--codex-preflight"], isPreflight: true)
+    }
+
     @objc private func checkProxy(_ sender: Any?) {
-        guard operationProcess == nil else { return }
+        guard operationProcess == nil, codexOperationProcess == nil else { return }
         beginOperation(arguments: ["--dry-run"], automatic: false, isProxyCheck: true)
     }
 
@@ -711,7 +823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func beginOperation(arguments: [String], automatic: Bool, isProxyCheck: Bool = false) {
-        guard operationProcess == nil, let engineURL else { return }
+        guard operationProcess == nil, codexOperationProcess == nil, let engineURL else { return }
         refreshTimer?.invalidate()
         refreshTimer = nil
         launchObservationStartedAt = nil
@@ -784,6 +896,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func beginCodexOperation(arguments: [String], isPreflight: Bool) {
+        guard codexOperationProcess == nil,
+              operationProcess == nil,
+              let engineURL else { return }
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        codexState = isPreflight ? .preflighting : .launching
+        updateInterface()
+
+        let (process, pipe) = makeEngineProcess(engineURL: engineURL, arguments: arguments)
+        codexOperationProcess = process
+        process.terminationHandler = { [weak self] process in
+            let output = Self.readOutput(from: pipe)
+            DispatchQueue.main.async {
+                guard let self, self.codexOperationProcess === process else { return }
+                self.codexOperationProcess = nil
+                let cleanOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                let values = Self.keyValueOutput(output)
+                let message = values["CODEX_PREFLIGHT_MESSAGE"]
+                    ?? Self.autoRecoverError(from: output)
+                    ?? (cleanOutput.isEmpty ? "Codex 代理操作没有返回诊断结果。" : cleanOutput)
+                let doctorLog = values["CODEX_DOCTOR_LOG"] ?? ""
+
+                if !cleanOutput.isEmpty {
+                    self.logger.write("Codex engine output (\(process.terminationStatus)): \(cleanOutput)")
+                }
+
+                if process.terminationStatus == 0 {
+                    if isPreflight {
+                        let suffix = doctorLog.isEmpty ? "" : "\n\n诊断日志：\(doctorLog)"
+                        self.showAlert(title: "Codex WebSocket 检查通过", message: message + suffix)
+                    }
+                    self.codexState = .checking
+                    self.scheduleRefresh(after: 1.5)
+                } else {
+                    self.codexState = .failed(Self.shortFailureSummary(message))
+                    let suffix = doctorLog.isEmpty ? "" : "\n\n诊断日志：\(doctorLog)"
+                    self.showAlert(
+                        title: isPreflight ? "Codex WebSocket 检查失败" : "Codex 代理启动失败",
+                        message: message + suffix
+                    )
+                }
+                self.updateInterface()
+            }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            codexOperationProcess = nil
+            codexState = .failed("无法运行代理脚本")
+            logger.write("Failed to run Codex operation: \(error.localizedDescription)")
+            updateInterface()
+            showAlert(title: "Codex 代理操作失败", message: error.localizedDescription)
+        }
+    }
+
     private func stopCurrentOperation() {
         guard let process = operationProcess else { return }
         logger.write("Stopping current operation")
@@ -825,6 +994,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let reason = output[beginRange.upperBound..<endRange.lowerBound]
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return reason.isEmpty ? nil : reason
+    }
+
+    private static func keyValueOutput(_ output: String) -> [String: String] {
+        var values: [String: String] = [:]
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            values[String(parts[0])] = String(parts[1])
+        }
+        return values
     }
 
     private static func makeStatusBarIcon() -> NSImage? {
@@ -906,6 +1085,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 # Antigravity Proxy configuration
                 # Uncomment and edit the line below when automatic system proxy detection is not suitable.
                 # ANTIGRAVITY_PROXY_URL='http://127.0.0.1:33210'
+                # ANTIGRAVITY_SOCKS_PROXY_URL='socks5h://127.0.0.1:33210'
+                # CODEX_APP='/Applications/ChatGPT.app'
                 """
                 try template.write(to: url, atomically: true, encoding: .utf8)
             }
@@ -937,6 +1118,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.informativeText = "检测到 Antigravity 已经在运行，但没有使用当前代理。请先保存正在编辑的内容。现在重启会先请求 Antigravity 正常退出；如果应用没有退出，不会强制终止。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "保存后立即重启")
+        alert.addButton(withTitle: "稍后")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func confirmSafeCodexRestart() -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "需要重启 Codex"
+        alert.informativeText = "重启会中断当前正在运行的 Codex 任务和连接。AP 会先在独立进程中检查 API 与 WebSocket；只有检查通过才会请求 Codex 正常退出，而且不会强制终止。请先确认当前工作已经保存。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "保存后检查并重启")
         alert.addButton(withTitle: "稍后")
         return alert.runModal() == .alertFirstButtonReturn
     }
