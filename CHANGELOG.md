@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.0
+
+- Remove the Codex desktop proxy menu, commands, configuration, and diagnostics.
+- Keep Antigravity desktop and CLI proxy launch features.
+
+## 1.4.0
+
+- Add a menu bar action that opens Antigravity CLI in Terminal with the current macOS system proxy.
+- Check CLI installation, proxy availability, and Google connectivity before starting a CLI session.
+- Keep existing CLI sessions untouched; each menu action opens a separate Terminal session.
+
 ## 1.3.0
 
 - Add opt-in Codex desktop proxy launch and WebSocket diagnostics.

@@ -17,15 +17,27 @@ OUTPUT_DIR="$TEST_OUTPUT" "$ROOT_DIR/scripts/build-menubar-app.sh"
 [[ -x "$WRAPPER" ]]
 [[ -x "$MENU_BINARY" ]]
 [[ -x "$ENGINE" ]]
+[[ -x "$APP/Contents/Resources/AntigravityCLI.command" ]]
 [[ -f "$APP/Contents/Resources/AppIcon.icns" ]]
 [[ "$(/usr/bin/plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" == 'true' ]]
 [[ "$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist")" == 'io.github.antigravity-proxy.launcher' ]]
 
-"$WRAPPER" --version | /usr/bin/grep -qx '1.3.0'
+"$WRAPPER" --version | /usr/bin/grep -qx '1.5.0'
+
+FAKE_AGY="$TEST_OUTPUT/fake-agy"
+cat > "$FAKE_AGY" <<'SCRIPT'
+#!/bin/zsh
+printf 'CLI_HTTPS_PROXY=%s\n' "$HTTPS_PROXY"
+printf 'CLI_HTTP_PROXY=%s\n' "$HTTP_PROXY"
+printf 'CLI_ALL_PROXY=%s\n' "$ALL_PROXY"
+printf 'CLI_NO_PROXY=%s\n' "$NO_PROXY"
+SCRIPT
+chmod +x "$FAKE_AGY"
 
 status_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_OUTPUT/nonexistent.conf" \
   ANTIGRAVITY_PROXY_URL='http://127.0.0.1:33210' \
   ANTIGRAVITY_NO_AUTO_DETECT=1 \
+  AGY_CLI_BIN="$FAKE_AGY" \
   "$WRAPPER" --status)
 printf '%s\n' "$status_output" | /usr/bin/grep -q '^PID='
 printf '%s\n' "$status_output" | /usr/bin/grep -qx 'PROXY_URL=http://127.0.0.1:33210'
@@ -33,23 +45,51 @@ printf '%s\n' "$status_output" | /usr/bin/grep -q '^HAS_PROXY_ENV=[01]$'
 printf '%s\n' "$status_output" | /usr/bin/grep -q '^MAIN_BLANK=[01]$'
 printf '%s\n' "$status_output" | /usr/bin/grep -q '^PROXY_READY=[01]$'
 printf '%s\n' "$status_output" | /usr/bin/grep -q '^APP_PATH='
-printf '%s\n' "$status_output" | /usr/bin/grep -q '^CODEX_INSTALLED=[01]$'
-printf '%s\n' "$status_output" | /usr/bin/grep -q '^CODEX_PID='
-printf '%s\n' "$status_output" | /usr/bin/grep -q '^CODEX_HAS_PROXY_ENV=[01]$'
-printf '%s\n' "$status_output" | /usr/bin/grep -q '^CODEX_APP_PATH='
-printf '%s\n' "$status_output" | /usr/bin/grep -qx 'ALL_PROXY_URL=http://127.0.0.1:33210'
-
-# Codex launch notifications are status-only. The menu app must never gain a
-# hidden automatic-recovery path that could terminate the task hosting AP.
-/usr/bin/grep -q 'com.openai.codex' "$ROOT_DIR/src/MenuBar/main.swift"
-/usr/bin/grep -q 'status refresh only' "$ROOT_DIR/src/MenuBar/main.swift"
-/usr/bin/grep -q 'ipRefreshMenuItem.view = ipRefreshButton' "$ROOT_DIR/src/MenuBar/main.swift"
-/usr/bin/grep -q 'ipRefreshButton.isEnabled = false' "$ROOT_DIR/src/MenuBar/main.swift"
-if /usr/bin/grep -q -- '--codex-auto-recover' "$ROOT_DIR/src/MenuBar/main.swift"; then
-  printf 'Codex automatic takeover must remain disabled.\n' >&2
+printf '%s\n' "$status_output" | /usr/bin/grep -qx 'AGY_CLI_INSTALLED=1'
+printf '%s\n' "$status_output" | /usr/bin/grep -qx "AGY_CLI_BIN=$FAKE_AGY"
+if printf '%s\n' "$status_output" | /usr/bin/grep -Eiq 'CODEX|ALL_PROXY_URL'; then
+  printf 'Removed app status must not appear in --status.\n' >&2
   exit 1
 fi
 
+# The Terminal launcher must pass the proxy detected at launch time to the CLI.
+FAKE_SCUTIL="$TEST_OUTPUT/fake-agy-scutil"
+cat > "$FAKE_SCUTIL" <<'SCRIPT'
+#!/bin/zsh
+cat <<'OUTPUT'
+<dictionary> {
+  HTTPEnable : 1
+  HTTPProxy : 127.0.0.1
+  HTTPPort : 7788
+  HTTPSEnable : 1
+  HTTPSProxy : 127.0.0.1
+  HTTPSPort : 7788
+}
+OUTPUT
+SCRIPT
+chmod +x "$FAKE_SCUTIL"
+FAKE_NC="$TEST_OUTPUT/fake-agy-nc"
+printf '#!/bin/zsh\nexit 0\n' > "$FAKE_NC"
+chmod +x "$FAKE_NC"
+FAKE_CURL="$TEST_OUTPUT/fake-agy-curl"
+printf '#!/bin/zsh\nprintf "200"\n' > "$FAKE_CURL"
+chmod +x "$FAKE_CURL"
+agy_output=$(ANTIGRAVITY_CONFIG_FILE="$TEST_OUTPUT/nonexistent.conf" \
+  ANTIGRAVITY_SCUTIL_BIN="$FAKE_SCUTIL" \
+  ANTIGRAVITY_NC_BIN="$FAKE_NC" \
+  ANTIGRAVITY_CURL_BIN="$FAKE_CURL" \
+  AGY_CLI_BIN="$FAKE_AGY" \
+  "$ENGINE" --agy-cli-exec)
+printf '%s\n' "$agy_output" | /usr/bin/grep -qx 'CLI_HTTPS_PROXY=http://127.0.0.1:7788'
+printf '%s\n' "$agy_output" | /usr/bin/grep -qx 'CLI_HTTP_PROXY=http://127.0.0.1:7788'
+printf '%s\n' "$agy_output" | /usr/bin/grep -qx 'CLI_ALL_PROXY=http://127.0.0.1:7788'
+printf '%s\n' "$agy_output" | /usr/bin/grep -qx 'CLI_NO_PROXY=localhost,127.0.0.1,::1,.local'
+
+/usr/bin/grep -q '启动 Antigravity CLI（代理模式）' "$ROOT_DIR/src/MenuBar/main.swift"
+/usr/bin/grep -q 'ipRefreshMenuItem.view = ipRefreshButtonContainer' "$ROOT_DIR/src/MenuBar/main.swift"
+/usr/bin/grep -q 'ipRefreshButton.bezelStyle = .rounded' "$ROOT_DIR/src/MenuBar/main.swift"
+/usr/bin/grep -q 'ipRefreshButton.isBordered = true' "$ROOT_DIR/src/MenuBar/main.swift"
+/usr/bin/grep -q 'ipRefreshButton.isEnabled = false' "$ROOT_DIR/src/MenuBar/main.swift"
 set +e
 ip_info_output=$(ANTIGRAVITY_SUPPRESS_NOTIFICATIONS=1 \
   ANTIGRAVITY_CONFIG_FILE="$TEST_OUTPUT/nonexistent.conf" \

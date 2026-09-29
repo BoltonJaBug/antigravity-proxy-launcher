@@ -20,6 +20,7 @@ rm -rf "$APP_PATH"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 /usr/bin/install -m 755 "$ROOT_DIR/src/AntigravityProxyApp" "$CONTENTS/MacOS/AntigravityProxy"
 /usr/bin/install -m 755 "$ROOT_DIR/src/AntigravityProxy" "$CONTENTS/Resources/AntigravityProxy"
+/usr/bin/install -m 755 "$ROOT_DIR/src/AntigravityCLI.command" "$CONTENTS/Resources/AntigravityCLI.command"
 /usr/bin/install -m 644 "$ROOT_DIR/packaging/Info.plist" "$CONTENTS/Info.plist"
 /usr/bin/install -m 644 "$ROOT_DIR/packaging/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 
